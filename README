@@ -1,0 +1,5 @@
+                          OrcScal
+
+An implementation of the Orc combinators as a Scala library.
+
+The Orc language is discribed at: https://orc.csres.utexas.edu/
