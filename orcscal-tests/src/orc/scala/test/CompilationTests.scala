@@ -21,7 +21,8 @@ object CompilationTests {
 
   val o3: Iterable[Nothing] = orc {
     val x = (42).graft
-    variable(x).flatMap[Nothing](_ => stop)
+    x.binder |||
+    (for(_ <- variable(x)) yield { stop })
   }
 
   def Site(): Orc[Int] = 42
