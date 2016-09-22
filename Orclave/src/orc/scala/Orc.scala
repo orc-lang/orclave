@@ -19,9 +19,6 @@ import scala.concurrent.ExecutionContext
 import orc.scala.impl.KilledException
 import scala.concurrent.Channel
 
-// TODO: Fix names. orc method name is causing import problems.
-// TODO: Convert to eclipse projects without SBT.
-
 // TODO: Once things are looking good set very simply macro requirements: transparent futures 
 //       are a first goal, then generating errors for code that drops values in the middle of 
 //       Orc code.
@@ -124,7 +121,7 @@ object Orc extends OrcLowPriorityImplicits {
     * The returned iterable will contain all the publications of the expressions
     * as they become available. The iterable will end when the Orc expression halts.
     */
-  def orc[T](o: Orc[T])(implicit ctx: OrcExecutionContext): Iterator[T] = {
+  def orclave[T](o: Orc[T])(implicit ctx: OrcExecutionContext): Iterator[T] = {
     // TODO: This is messy. A custom iterator which iteracts directly with the Orc execution would be better.
     val chan = new Channel[Option[T]]()
     val iter = new Iterator[T]() {
@@ -166,7 +163,7 @@ object Orc extends OrcLowPriorityImplicits {
     * This triggers Orc macro expansion without executing it or creating an
     * iterable from the publications.
     */
-  def orcRaw[T](o: Orc[T]): Orc[T] = o
+  def orcExpr[T](o: Orc[T]): Orc[T] = o
 
   /** Alternative syntax for graft.
     */
@@ -175,6 +172,10 @@ object Orc extends OrcLowPriorityImplicits {
   /** Alternative syntax for trim.
     */
   def trim[T](f: Orc[T]): Orc[T] = f.trim
+
+  /** Embed a scala expression in an orclave.
+    */
+  def scalaclave[T](v: => T): Orc[T] = scalaExpr(v)
 
   /** Create an Orc variable expression.
     *

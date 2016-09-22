@@ -12,35 +12,35 @@ import scala.concurrent.ExecutionContext
 class SimpleRunTests extends FlatSpec with Matchers {
   implicit val ctx = OrcExecutionContext(ExecutionContext.global)
 
-  def badSleep(n: Long): Orc[Unit] = scalaExpr(Thread.sleep(n))
+  def badSleep(n: Long): Orc[Unit] = scalaclave(Thread.sleep(n))
 
   "OrcScal runtime" should "execute constant expressions" in {
-    val r = orc { 1 }
+    val r = orclave { 1 }
     r.toList should be(List(1))
   }
 
   it should "execute parallel constants" in {
-    val r = orc { 1 ||| 2 }
+    val r = orclave { 1 ||| 2 }
     r.toList should contain theSameElementsAs (List(1, 2))
   }
 
   it should "execute stop" in {
-    val r = orc { stop }
+    val r = orclave { stop }
     r.toList.size should be(0)
   }
 
   it should "execute side-effect at the correct time" in {
     var x = 0
-    val o = orcRaw { x = 42 }
+    val o = orcExpr { x = 42 }
     x should be(0)
-    val r = orc(o)
+    val r = orclave(o)
     r.toSet should be(Set(()))
     x should be(42)
   }
 
   it should "execute graft" in {
     failAfter(10 seconds) {
-      val r = orc {
+      val r = orclave {
         val x = (42).graft
         x.body |||
           x.future
@@ -48,7 +48,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
       r.toList should be(List(42))
     }
     failAfter(10 seconds) {
-      val r = orc {
+      val r = orclave {
         val x = (stop).graft
         x.body |||
           x.future
@@ -59,13 +59,13 @@ class SimpleRunTests extends FlatSpec with Matchers {
 
   it should "execute otherwise" in {
     failAfter(10 seconds) {
-      val r = orc {
+      val r = orclave {
         stop otherwise 42
       }
       r.toList should be(List(42))
     }
     failAfter(10 seconds) {
-      val r = orc {
+      val r = orclave {
         5 otherwise 42
       }
       r.toList should be(List(5))
@@ -74,7 +74,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
 
   it should "execute trim" in {
     failAfter(10 seconds) {
-      val r = orc {
+      val r = orclave {
         trim { 1 ||| 2 }
       }
       val s = r.toList
@@ -82,16 +82,16 @@ class SimpleRunTests extends FlatSpec with Matchers {
       s should contain oneOf (1, 2)
     }
     failAfter(10 seconds) {
-      val r = orc {
-        trim { scalaExpr({ Thread.sleep(100); 1 }) ||| 2 }
+      val r = orclave {
+        trim { scalaclave({ Thread.sleep(100); 1 }) ||| 2 }
       }
       val s = r.toList
       s.size should be(1)
       s should contain(2)
     }
     failAfter(10 seconds) {
-      val r = orc {
-        trim { 1 ||| scalaExpr({ Thread.sleep(100); 2 }) }
+      val r = orclave {
+        trim { 1 ||| scalaclave({ Thread.sleep(100); 2 }) }
       }
       val s = r.toList
       s.size should be(1)
@@ -101,7 +101,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
 
   it should "execute branch" in {
     failAfter(10 seconds) {
-      val r = orc {
+      val r = orclave {
         for (x <- 3) yield {
           x + 1
         }
@@ -109,7 +109,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
       r.toList should contain theSameElementsAs List(4)
     }
     failAfter(10 seconds) {
-      val r = orc {
+      val r = orclave {
         for (x <- 1 ||| 2) yield {
           x + 1
         }
@@ -120,7 +120,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
 
   it should "execute branch on future" in {
     failAfter(10 seconds) {
-      val r = orc {
+      val r = orclave {
         val x = badSleep(100).graft
         x.body ||| 1 ||| {
           for (_ <- variable(x.future)) yield {
@@ -131,7 +131,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
       r.toList should be(List(1, 4))
     }
     failAfter(10 seconds) {
-      val r = orc {
+      val r = orclave {
         val x = badSleep(100).graft
         x.body ||| {
           for (_ <- variable(x.future)) yield {
@@ -142,7 +142,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
       r.toList should be(List(1, 4))
     }
     failAfter(10 seconds) {
-      val r = orc {
+      val r = orclave {
         val x = badSleep(100).graft
         (
           for (_ <- variable(x.future)) yield {
@@ -155,7 +155,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
 
   it should "execute branch with sleep" in {
     failAfter(10 seconds) {
-      val r = orc {
+      val r = orclave {
         1 ||| {
           for (_ <- badSleep(100)) yield {
             4
@@ -165,7 +165,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
       r.toList should be(List(1, 4))
     }
     failAfter(10 seconds) {
-      val r = orc {
+      val r = orclave {
         {
           for (_ <- badSleep(100)) yield {
             4
@@ -178,7 +178,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
 
   it should "execute otherwise with sleep" in {
     failAfter(10 seconds) {
-      val r = orc {
+      val r = orclave {
         1 ||| {
           (for (_ <- badSleep(100)) yield {
             stop
@@ -188,7 +188,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
       r.toList should be(List(1, 3))
     }
     failAfter(10 seconds) {
-      val r = orc {
+      val r = orclave {
         {
           (for (_ <- badSleep(100)) yield {
             stop
@@ -201,7 +201,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
 
   it should "execute parallel with sleep" in {
     failAfter(10 seconds) {
-      val r = orc {
+      val r = orclave {
         (for (_ <- badSleep(100) ||| badSleep(100) ||| badSleep(100)) yield {
           1
         }) ||| {
@@ -213,7 +213,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
       r.toList should be(List(1, 1, 1, 5))
     }
     failAfter(10 seconds) {
-      val r = orc {
+      val r = orclave {
         {
           (for (_ <- badSleep(200)) yield {
             5
@@ -230,7 +230,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
   it should "execute trim with sleep" in {
     failAfter(10 seconds) {
       var x = 0
-      val r = orc {
+      val r = orclave {
         trim {
           1 ||| {
             for (_ <- badSleep(100)) yield {
@@ -245,7 +245,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
     }
     failAfter(10 seconds) {
       var x = 0
-      val r = orc {
+      val r = orclave {
         trim {
           {
             (for (_ <- badSleep(100)) yield {
@@ -260,7 +260,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
     }
     failAfter(10 seconds) {
       var x = 0
-      val r = orc {
+      val r = orclave {
         trim {
           {
             (for (_ <- badSleep(200)) yield {
@@ -282,7 +282,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
 
   it should "kill scala sleep in trim" in {
     failAfter(10 seconds) {
-      val r = orc {
+      val r = orclave {
         ({
           for (
             _ <- trim {
@@ -302,9 +302,9 @@ class SimpleRunTests extends FlatSpec with Matchers {
   it should "interrupt scala code in trim" in {
     failAfter(10 seconds) {
       var exc: Exception = null
-      val r = orc {
+      val r = orclave {
         trim {
-          (for (_ <- badSleep(100)) yield ()) ||| scalaExpr {
+          (for (_ <- badSleep(100)) yield ()) ||| scalaclave {
             val o = new Object()
             try {
               o.synchronized { o.wait() }
@@ -320,9 +320,9 @@ class SimpleRunTests extends FlatSpec with Matchers {
     }
     failAfter(10 seconds) {
       var interrupted = false
-      val r = orc {
+      val r = orclave {
         trim {
-          (for (_ <- badSleep(100)) yield ()) ||| scalaExpr {
+          (for (_ <- badSleep(100)) yield ()) ||| scalaclave {
             while (!interrupted) {
               interrupted = Thread.interrupted()
             }

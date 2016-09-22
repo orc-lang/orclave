@@ -12,7 +12,7 @@ object TestApp {
 
   def main(args: Array[String]): Unit = {
     Util.timeIt {
-      val r = orc {
+      val r = orclave {
         (for (_ <- badSleep(100) ||| badSleep(100) ||| badSleep(100)) yield {
           1
         }) ||| {
