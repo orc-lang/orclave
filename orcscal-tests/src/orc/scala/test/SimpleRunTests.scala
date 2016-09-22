@@ -12,10 +12,13 @@ import scala.concurrent.ExecutionContext
 class SimpleRunTests extends FlatSpec with Matchers {
   implicit val ctx = OrcExecutionContext(ExecutionContext.global)
 
+  def badSleep(n: Long): Orc[Unit] = scalaExpr(Thread.sleep(n))
+  
   "OrcScal runtime" should "execute constant expressions" in {
     val r = orc { 1 }
     r.toList should be(List(1))
   }
+
 
   it should "execute parallel constants" in {
     val r = orc { 1 ||| 2 }
@@ -119,7 +122,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
   it should "execute branch on future" in {
     failAfter(10 seconds) {
       val r = orc {
-        val x = scalaExpr(Thread.sleep(100)).graft
+        val x = badSleep(100).graft
         x.body ||| 1 ||| {
           for (_ <- variable(x.future)) yield {
             4
@@ -130,7 +133,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
     }
     failAfter(10 seconds) {
       val r = orc {
-        val x = scalaExpr(Thread.sleep(100)).graft
+        val x = badSleep(100).graft
         x.body ||| {
           for (_ <- variable(x.future)) yield {
             4
@@ -141,7 +144,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
     }
     failAfter(10 seconds) {
       val r = orc {
-        val x = scalaExpr(Thread.sleep(100)).graft
+        val x = badSleep(100).graft
         (
           for (_ <- variable(x.future)) yield {
             4
@@ -155,7 +158,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
     failAfter(10 seconds) {
       val r = orc {
         1 ||| {
-          for (_ <- scalaExpr(Thread.sleep(100))) yield {
+          for (_ <- badSleep(100)) yield {
             4
           }
         }
@@ -165,7 +168,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
     failAfter(10 seconds) {
       val r = orc {
         {
-          for (_ <- scalaExpr(Thread.sleep(100))) yield {
+          for (_ <- badSleep(100)) yield {
             4
           }
         } ||| 1
@@ -178,7 +181,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
     failAfter(10 seconds) {
       val r = orc {
         1 ||| {
-          (for (_ <- scalaExpr(Thread.sleep(100))) yield {
+          (for (_ <- badSleep(100)) yield {
             stop
           }) otherwise 3
         }
@@ -188,7 +191,7 @@ class SimpleRunTests extends FlatSpec with Matchers {
     failAfter(10 seconds) {
       val r = orc {
         {
-          (for (_ <- scalaExpr(Thread.sleep(100))) yield {
+          (for (_ <- badSleep(100)) yield {
             stop
           }) otherwise 3
         } ||| 1
@@ -196,8 +199,6 @@ class SimpleRunTests extends FlatSpec with Matchers {
       r.toList should be(List(1, 3))
     }
   }
-
-  def badSleep(n: Long): Orc[Unit] = scalaExpr(Thread.sleep(n))
 
   it should "execute parallel with sleep" in {
     failAfter(10 seconds) {
@@ -277,6 +278,60 @@ class SimpleRunTests extends FlatSpec with Matchers {
       x should be(0)
       r.toList should be(List(1))
       x should be(0)
+    }
+  }
+
+  it should "kill scala sleep in trim" in {
+    failAfter(10 seconds) {
+      val r = orc {
+        ({
+          for (
+            _ <- trim {
+              () ||| badSleep(1000)
+            }
+          ) yield stop
+        } otherwise {
+          1
+        }) ||| (for (_ <- badSleep(100)) yield {
+          2
+        })
+      }
+      r.toList should be(List(1, 2))
+    }
+  }
+
+  it should "interrupt scala code in trim" in {
+    failAfter(10 seconds) {
+      var exc: Exception = null
+      val r = orc {
+        trim {
+          (for (_ <- badSleep(100)) yield ()) ||| scalaExpr {
+            val o = new Object()
+            try {
+              o.synchronized { o.wait() }
+            } catch {
+              case e: Exception =>
+                exc = e
+            }
+          }
+        }
+      }
+      r.toList should be(List(()))
+      exc shouldBe a[InterruptedException]
+    }
+    failAfter(10 seconds) {
+      var interrupted = false
+      val r = orc {
+        trim {
+          (for (_ <- badSleep(100)) yield ()) ||| scalaExpr {
+            while (!interrupted) {
+              interrupted = Thread.interrupted()
+            }
+          }
+        }
+      }
+      r.toList should be(List(()))
+      interrupted should be(true)
     }
   }
 }

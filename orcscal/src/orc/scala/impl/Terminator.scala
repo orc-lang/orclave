@@ -41,6 +41,20 @@ class Terminator extends Terminatable {
       addChild(child)
     }
   }
+  
+  def removeChild(child: Terminatable): Unit = {
+    val orig = children.get()
+    if (orig == null) {
+      child.kill()
+      throw KilledException.SINGLETON
+    }
+
+    val n = orig.filter(_ != child)
+    if (!children.compareAndSet(orig, n)) {
+      // Retry on failure to set
+      removeChild(child)
+    }
+  }
 
   /** Check that this context is live and throw KilledException if it is not.
     */
@@ -89,4 +103,10 @@ class Terminator extends Terminatable {
   */
 final class TerminatorNested(parent: Terminator) extends Terminator {
   parent.addChild(this)
+}
+
+final class TerminatableThread(thread: Thread = Thread.currentThread()) extends Terminatable {
+  def kill() = {
+    thread.interrupt()
+  }
 }

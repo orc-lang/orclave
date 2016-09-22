@@ -19,15 +19,15 @@ import scala.concurrent.ExecutionContext
 import orc.scala.impl.KilledException
 import scala.concurrent.Channel
 
-// TODO: Make termination set interrupt state in non-Orc code.
 // TODO: Fix names. orc method name is causing import problems.
-// TODO: Think about project name. OrcScal sounds great, but reads almost identically to OrcScala.
+// TODO: Convert to eclipse projects without SBT.
 
 // TODO: Once things are looking good set very simply macro requirements: transparent futures 
 //       are a first goal, then generating errors for code that drops values in the middle of 
 //       Orc code.
 
-// TODO: Convert to eclipse projects without SBT.
+// TODO: Add version of otherwise that functions like catch and allows exceptions to be handled. 
+//       Normal halts would be given as a HaltedNormally sentinal value that is not of type Exception.
 
 /** An instance of Orc[T] represents an instance of an Orc expression.
   *

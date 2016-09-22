@@ -102,14 +102,14 @@ class ScalaExpr[T](v: () => T) extends Orc[T] {
   def execute(p: PublicationCont[T])(implicit ctx: OrcExecutionContext): Unit = {
     // TODO: Check
     ctx.schedule {
+      ctx.enterTerminatable()
       val res = try {
-        ctx.checkLive()
         Some(v())
       } catch {
-        case e: KilledException =>
-          throw e
         case _: Exception =>
           None
+      } finally {
+        ctx.leaveTerminatable()
       }
       res.map(p)
     }
