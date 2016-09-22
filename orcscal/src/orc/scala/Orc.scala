@@ -1,6 +1,23 @@
+//
+// Orc.scala -- Core traits and classes for the OrcScal DSL
+// Project OrcScal
+//
+// Created by amp
+//
+// Copyright (c) 2016 The University of Texas at Austin. All rights reserved.
+//
+// Use and redistribution of this file is governed by the license terms in
+// the LICENSE file found in the project's top-level directory and also found at
+// URL: http://orc.csres.utexas.edu/license.shtml .
+//
+
 package orc.scala
 
 import impl.{ PublicationCont, Counter, Terminator }
+import scala.concurrent.Future
+import scala.concurrent.ExecutionContext
+import orc.scala.impl.KilledException
+import scala.concurrent.Channel
 
 /** An instance of Orc[T] represents an instance of an Orc expression.
   *
@@ -71,7 +88,7 @@ trait Orc[+T] {
   /** Convert this expression into a future which is bound to the first
     * publication of this.
     */
-  def graft: Future[T] = new impl.Graft(this)
+  def graft: Graft[T] = new impl.Graft(this)
 
   /** Create a new expression which will kill this when it publishes for the first
     * time.
@@ -88,10 +105,12 @@ trait Orc[+T] {
 
   /** Execute this expression.
     */
-  def execute(p: PublicationCont[T], c: Counter, t: Terminator): Unit
+  def execute(p: PublicationCont[T])(implicit executor: OrcExecutionContext): Unit
+}
 
-  // TODO: Where should this actually go? Integrate with Scala concurrency context?
-  def schedule(f: => Unit) = ???
+trait Graft[+T] {
+  def future: Future[T]
+  def body: Orc[Nothing]
 }
 
 object Orc extends OrcLowPriorityImplicits {
@@ -105,11 +124,39 @@ object Orc extends OrcLowPriorityImplicits {
     * The returned iterable will contain all the publications of the expressions
     * as they become available. The iterable will end when the Orc expression halts.
     */
-  def orc[T](o: Orc[T]): Iterable[T] = {
-    // TODO
-    o.execute(???, ???, ???)
-    ???
+  def orc[T](o: Orc[T])(implicit ctx: OrcExecutionContext): Iterator[T] = {
+    val chan = new Channel[Option[T]]()
+    val iter = new Iterator[T]() {
+      var nextElem: Option[T] = null
+      def checkNextElem(): Option[T] = nextElem match {
+        case null =>
+          nextElem = chan.read
+          nextElem
+        case _ =>
+          nextElem
+      }
+      def hasNext: Boolean = checkNextElem().isDefined
+      def next(): T = checkNextElem() match {
+        case Some(v) =>
+          nextElem = chan.read
+          v
+        case None =>
+          throw new IllegalStateException()
+      }
+    }
+    val newCounter = new impl.CounterNested(ctx.counter, () => chan.write(None))
+    try {
+      o.execute(v => chan.write(Some(v)))(ctx.withCounter(newCounter))
+    } catch {
+      case _: KilledException => ()
+    } finally {
+      newCounter.halt()
+    }
+    iter
   }
+
+  // TODO: Figure out how to implement an async version of the interface to Orc expressions.
+  //       It should enable polling and callbacks and the like.
 
   /** Get an Orc expression directly without executing it.
     *
@@ -120,7 +167,7 @@ object Orc extends OrcLowPriorityImplicits {
 
   /** Alternative syntax for graft.
     */
-  def graft[T](f: Orc[T]): Future[T] = f.graft
+  def graft[T](f: Orc[T]): Graft[T] = f.graft
 
   /** Alternative syntax for trim.
     */
@@ -138,41 +185,5 @@ trait OrcLowPriorityImplicits {
     *
     * The returned Orc expression publishes v and halts.
     */
-  implicit def const[T](v: T): Orc[T] = new impl.Const(v)
-}
-
-/** An object which may later be given a value.
-  */
-trait Future[+T] {
-  /** Call f with the value of the future.
-    *
-    * Unlike Orc.map this may be called at any time and will never call f
-    * more than once.
-    */
-  def map[B](f: T => B): Future[B]
-
-  /** Ignore the value if `b` is false for it.
-    *
-    * The resulting future will halt if the value is rejected.
-    */
-  def withFilter(b: T => Boolean): Future[T]
-
-  /** Call f if the future is halted and will never be bound.
-    */
-  def onHalted(f: () => Unit): Unit
-  
-  val binder: Orc[Nothing]
-}
-
-object Future {
-  // TODO: Need to autogenerate these
-
-  /** Combine a number of futures into a future for a tuple.
-    *
-    * The result will halt if any future in the tuple halts.
-    */
-  def join[T1, T2](f1: Future[T1], f2: Future[T2]): Future[(T1, T2)] = ???
-  def join[T1, T2, T3](f1: Future[T1], f2: Future[T2], f3: Future[T3]): Future[(T1, T2, T3)] = ???
-  def join[T1, T2, T3, T4](f1: Future[T1], f2: Future[T2], f3: Future[T3], f4: Future[T4]): Future[(T1, T2, T3, T4)] = ???
-  // TODO: Implementations
+  implicit def scalaExpr[T](v: => T): Orc[T] = new impl.ScalaExpr(() => v)
 }

@@ -1,5 +1,5 @@
 //
-// package.scala -- Package level declarations for orc.scala.impl
+// Logger.scala -- Scala object Logger
 // Project OrcScal
 //
 // Created by amp
@@ -13,6 +13,8 @@
 
 package orc.scala
 
-package object impl {
-  type PublicationCont[T] = (T) => Unit
-}
+/** Logger for the orc.scala subsystem
+  *
+  * @author amp
+  */
+object Logger extends orc.util.Logger("orc.scala")

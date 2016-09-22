@@ -23,6 +23,7 @@ lazy val orcscal = (project in file("orcscal")).
 
 lazy val orcscalTests = (project in file("orcscal-tests")).
   settings(commonSettings: _*).settings(
+    libraryDependencies += "org.scalatest" %% "scalatest" % "3.0.0" % "test"
     //scalacOptions ++= Seq("-Xprint:typer"),
     //scalacOptions ++= Seq("-uniqid"),
     //scalacOptions ++= Seq("-Xprint-types"),

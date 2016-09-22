@@ -3,43 +3,45 @@ package orc.scala.test
 import orc.scala._
 
 import Orc._
-import Future._
+import scala.concurrent.Future
+import scala.concurrent.ExecutionContext
 
 object CompilationTests {
-  val o0: Iterable[Int] = orc { 1 }
+  implicit val ctx = OrcExecutionContext(ExecutionContext.global)
 
-  val o1: Iterable[Unit] = orc {
+  def o0: Iterator[Int] = orc { 1 }
+
+  def o1: Iterator[Unit] = orc {
     for (x <- (1 ||| 2)) yield {
       println(x)
     }
   }
 
-  val o2: Iterable[Int] = orc {
+  def o2: Iterator[Int] = orc {
     val x = (42).graft
-    x
+    x.future
   }
 
-  val o3: Iterable[Nothing] = orc {
+  def o3: Iterator[Nothing] = orc {
     val x = (42).graft
-    x.binder |||
-    (for(_ <- variable(x)) yield { stop })
+    x.body |||
+      (for (_ <- variable(x.future)) yield { stop })
   }
 
   def Site(): Orc[Int] = 42
   def Other(): Orc[String] = "test"
 
-  val o4: Iterable[String] = orc {
+  def o4: Iterator[String] = orc {
     val x = (42).graft
-    for(_ <- variable(x)) yield Other()
+    for (_ <- variable(x.future)) yield Other()
   }
 
-
-  val big0: Iterable[Unit] = orc {
+  def big0: Iterator[Unit] = orc {
     {
-      val x: Future[Int] = graft { trim { Site() } }
+      val x: Graft[Int] = graft { trim { Site() } }
       for {
-        z <- (for ((x_, y_) <- join(x, Other().graft)) yield x_ + y_) |||
-             x.toString
+        z <- (for (Seq(x_ : Int, y_ : String) <- Future.sequence(Seq(x.future, Other().graft.future))) yield x_ + y_) |||
+          x.toString
         _ <- println(z)
       } yield {
         ()
