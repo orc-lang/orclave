@@ -1,9 +1,5 @@
-target
-project/target
 .cache-main
 .classpath
-.project
-.settings/
 bin
 .ensime
 .ensime_cache
