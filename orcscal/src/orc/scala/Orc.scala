@@ -49,9 +49,6 @@ trait Orc[+T] {
     * foreach on Orc is similar to `flatMap` because this enables Orc expressions to
     * appear in the body of for-loops over Orc[T]. This should not cause problems
     * because any expression can be wrapped into an Orc[T].
-    *
-    * Only one call to foreach, map, flatMap, or withFilter is allowed and it must be
-    * called before execute is called.
     */
   // TODO: Once other combinators are working, come back to this and see if it is useful.
   //def foreach[B](f: T => Orc[B]): Orc[Nothing]
@@ -62,17 +59,11 @@ trait Orc[+T] {
     * map on Orc is actually `flatMap` because this enables Orc expressions to
     * appear in the body of for-loops over Orc[T]. This should not cause problems
     * because any expression can be wrapped into an Orc[T].
-    *
-    * Only one call to foreach, map, flatMap, or withFilter is allowed and it must be
-    * called before execute is called.
     */
   def map[B](f: T ⇒ Orc[B]): Orc[B] = new impl.Branch(this, f)
 
   /** Call f and execute the result for each value that this expression
     * publishes.
-    *
-    * Only one call to foreach, map, flatMap, or withFilter is allowed and it must be
-    * called before execute is called.
     */
   def flatMap[B](f: T => Orc[B]): Orc[B] = map(f)
 
@@ -127,7 +118,6 @@ object Orc extends OrcLowPriorityImplicits {
   /** The orc expression which never publishes and halts immediately.
     */
   val stop: Orc[Nothing] = new impl.Stop()
-  // TODO: Nothing cannot be inferred as a type parameter in at least some cases so type inferrence will mess up when using this sometimes.
 
   /** Execute an Orc expression eager/leniently.
     *
@@ -138,6 +128,7 @@ object Orc extends OrcLowPriorityImplicits {
     // TODO: This is messy. A custom iterator which iteracts directly with the Orc execution would be better.
     val chan = new Channel[Option[T]]()
     val iter = new Iterator[T]() {
+      // nextElem has three states: null (load next value), Some(v) (v was published), None (halted)
       var nextElem: Option[T] = null
       def checkNextElem(): Option[T] = nextElem match {
         case null =>
@@ -149,7 +140,7 @@ object Orc extends OrcLowPriorityImplicits {
       def hasNext: Boolean = checkNextElem().isDefined
       def next(): T = checkNextElem() match {
         case Some(v) =>
-          nextElem = chan.read
+          nextElem = null
           v
         case None =>
           throw new IllegalStateException()
@@ -161,6 +152,7 @@ object Orc extends OrcLowPriorityImplicits {
     } catch {
       case _: KilledException => ()
     } finally {
+      // Matched to: initial count in CounterNested above
       newCounter.halt()
     }
     iter

@@ -13,12 +13,11 @@ class SimpleRunTests extends FlatSpec with Matchers {
   implicit val ctx = OrcExecutionContext(ExecutionContext.global)
 
   def badSleep(n: Long): Orc[Unit] = scalaExpr(Thread.sleep(n))
-  
+
   "OrcScal runtime" should "execute constant expressions" in {
     val r = orc { 1 }
     r.toList should be(List(1))
   }
-
 
   it should "execute parallel constants" in {
     val r = orc { 1 ||| 2 }
@@ -234,9 +233,9 @@ class SimpleRunTests extends FlatSpec with Matchers {
       val r = orc {
         trim {
           1 ||| {
-            (for (_ <- badSleep(100)) yield {
+            for (_ <- badSleep(100)) yield {
               x = 1
-            })
+            }
           }
         }
       }
