@@ -226,4 +226,57 @@ class SimpleRunTests extends FlatSpec with Matchers {
       r.toList should be(List(1, 1, 1, 5))
     }
   }
+
+  it should "execute trim with sleep" in {
+    failAfter(10 seconds) {
+      var x = 0
+      val r = orc {
+        trim {
+          1 ||| {
+            (for (_ <- badSleep(100)) yield {
+              x = 1
+            })
+          }
+        }
+      }
+      x should be(0)
+      r.toList should be(List(1))
+      x should be(0)
+    }
+    failAfter(10 seconds) {
+      var x = 0
+      val r = orc {
+        trim {
+          {
+            (for (_ <- badSleep(100)) yield {
+              x = 1
+            })
+          } ||| 1
+        }
+      }
+      x should be(0)
+      r.toList should be(List(1))
+      x should be(0)
+    }
+    failAfter(10 seconds) {
+      var x = 0
+      val r = orc {
+        trim {
+          {
+            (for (_ <- badSleep(200)) yield {
+              x = 1
+            })
+          } |||
+            {
+              (for (_ <- badSleep(100)) yield {
+                1
+              })
+            }
+        }
+      }
+      x should be(0)
+      r.toList should be(List(1))
+      x should be(0)
+    }
+  }
 }

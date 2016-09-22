@@ -19,6 +19,16 @@ import scala.concurrent.ExecutionContext
 import orc.scala.impl.KilledException
 import scala.concurrent.Channel
 
+// TODO: Make termination set interrupt state in non-Orc code.
+// TODO: Fix names. orc method name is causing import problems.
+// TODO: Think about project name. OrcScal sounds great, but reads almost identically to OrcScala.
+
+// TODO: Once things are looking good set very simply macro requirements: transparent futures 
+//       are a first goal, then generating errors for code that drops values in the middle of 
+//       Orc code.
+
+// TODO: Convert to eclipse projects without SBT.
+
 /** An instance of Orc[T] represents an instance of an Orc expression.
   *
   * The expression may or may not be executing already. Other expressions (or
@@ -125,6 +135,7 @@ object Orc extends OrcLowPriorityImplicits {
     * as they become available. The iterable will end when the Orc expression halts.
     */
   def orc[T](o: Orc[T])(implicit ctx: OrcExecutionContext): Iterator[T] = {
+    // TODO: This is messy. A custom iterator which iteracts directly with the Orc execution would be better.
     val chan = new Channel[Option[T]]()
     val iter = new Iterator[T]() {
       var nextElem: Option[T] = null
@@ -156,7 +167,7 @@ object Orc extends OrcLowPriorityImplicits {
   }
 
   // TODO: Figure out how to implement an async version of the interface to Orc expressions.
-  //       It should enable polling and callbacks and the like.
+  //       It should enable polling and callbacks and the like. Maybe chained futures or similar.
 
   /** Get an Orc expression directly without executing it.
     *

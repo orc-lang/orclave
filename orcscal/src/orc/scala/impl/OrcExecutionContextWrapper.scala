@@ -18,8 +18,10 @@ class OrcExecutionContextWrapper(val counter: Counter, val terminator: Terminato
   }
 
   def schedule(task: => Unit): Unit = {
+    // Check live before scheduling because it may be expensive on this and other threads.
+    checkLive()
     // Matched to: halt in runnable below
-    counter.prepareSpawn()
+    prepareSpawn()
     prepare().execute(new Runnable() {
       def run() = {
         try {
@@ -28,7 +30,7 @@ class OrcExecutionContextWrapper(val counter: Counter, val terminator: Terminato
           case _: KilledException => ()
         } finally {
           // Matched to: prepareSpawn before execute
-          counter.halt()
+          halt()
         }
       }
     })

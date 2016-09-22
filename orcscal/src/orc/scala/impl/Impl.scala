@@ -25,7 +25,7 @@ class Parallel[T](l: Orc[T], r: Orc[T]) extends Orc[T] {
   def execute(p: PublicationCont[T])(implicit ctx: OrcExecutionContext): Unit = {
     // TODO: Check
     ctx.schedule { l.execute(p) }
-    r.execute(p)
+    ctx.schedule { r.execute(p) }
   }
 }
 
@@ -103,8 +103,11 @@ class ScalaExpr[T](v: () => T) extends Orc[T] {
     // TODO: Check
     ctx.schedule {
       val res = try {
+        ctx.checkLive()
         Some(v())
       } catch {
+        case e: KilledException =>
+          throw e
         case _: Exception =>
           None
       }
@@ -116,13 +119,13 @@ class ScalaExpr[T](v: () => T) extends Orc[T] {
 class Variable[T](fut: Future[T]) extends Orc[T] {
   def execute(p: PublicationCont[T])(implicit ctx: OrcExecutionContext): Unit = {
     // TODO: Check
-    ctx.counter.prepareSpawn()
+    ctx.prepareSpawn()
     fut.onComplete {
       case Success(x) =>
         p(x)
-        ctx.counter.halt()
+        ctx.halt()
       case Failure(e) =>
-        ctx.counter.halt()
+        ctx.halt()
     }
   }
 }
