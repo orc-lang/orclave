@@ -10,18 +10,18 @@ object TestApp {
 
   def badSleep(n: Long): Orc[Unit] = scalaExpr(Thread.sleep(n))
 
+  def delayedValue[T](n: Long, v: T): T = { Thread.sleep(n); v }
+  def delayedValueO[T](n: Long, v: T): Orc[T] = scalaExpr { Thread.sleep(n); v }
+
   def main(args: Array[String]): Unit = {
-    Util.timeIt {
-      val r = orclave {
-        (for (_ <- badSleep(100) ||| badSleep(100) ||| badSleep(100)) yield {
-          1
-        }) ||| {
-          (for (_ <- badSleep(200)) yield {
-            5
-          })
-        }
+    val r = orclave {
+      orcExpr {
+        val a = delayedValue(1000, 1)
+        val b = delayedValueO(1000, 2)
+        val c = delayedValue(1000, 3)
+        a + b + c
       }
-      println(r.toList)
     }
+    println(r.toList)
   }
 }
