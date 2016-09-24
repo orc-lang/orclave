@@ -19,7 +19,7 @@ object TestApp {
         val a = delayedValue(1000, 1)
         val b = delayedValueO(1000, 2)
         val c = delayedValue(1000, 3)
-        a + b + c
+        a + b + c + scalaclave(10)
       }
     }
     println(r.toList)

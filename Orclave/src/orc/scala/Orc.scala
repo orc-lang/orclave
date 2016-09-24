@@ -18,9 +18,10 @@ import scala.concurrent.Future
 import scala.concurrent.ExecutionContext
 import orc.scala.impl.KilledException
 import scala.concurrent.Channel
-
-import scala.language.implicitConversions
 import scala.annotation.compileTimeOnly
+
+import scala.language.experimental.macros
+import scala.language.implicitConversions
 
 // TODO: Once things are looking good set very simply macro requirements: transparent futures 
 //       are a first goal, then generating errors for code that drops values in the middle of 
@@ -161,8 +162,6 @@ object Orc extends OrcLowPriorityImplicits {
   // TODO: Figure out how to implement an async version of the interface to Orc expressions.
   //       It should enable polling and callbacks and the like. Maybe chained futures or similar.
 
-  import scala.language.experimental.macros
-
   /** Get an Orc expression directly without executing it.
     *
     * This triggers Orc macro expansion without executing it or creating an
@@ -180,7 +179,7 @@ object Orc extends OrcLowPriorityImplicits {
 
   /** Embed a scala expression in an orclave.
     */
-  def scalaclave[T](v: => T): Orc[T] = scalaExpr(v)
+  def scalaclave[T](v: => T): Orc[T] = new impl.ScalaExpr(() => v)
 
   /** Create an Orc variable expression.
     *
@@ -194,9 +193,9 @@ trait OrcLowPriorityImplicits {
     *
     * The returned Orc expression publishes v and halts.
     */
-  implicit def scalaExpr[T](v: => T): Orc[T] = new impl.ScalaExpr(() => v)
+  implicit def scalaExpr[T](v: => T): Orc[T] = macro impl.OrcMacro.scalaExpr
 
-  @compileTimeOnly("Orc expression can only be used as Orc[T] outside an orclave. An expression was used as T.")
+  @compileTimeOnly("[Orclave] Orc expression can only be used as Orc[T] outside an orclave. An expression was used as T.")
   implicit def orcToBeLifted[T](o: Orc[T]): T = {
     Logger.severe(s"orcToBeLifted should never appear in a compiled program. There is a bug in the macro.\n$o")
     throw new AssertionError("orcToBeLifted should never appear in a compiled program. There is a bug in the macro.")
