@@ -14,14 +14,13 @@ object TestApp {
   def delayedValueO[T](n: Long, v: T): Orc[T] = scalaExpr { Thread.sleep(n); v }
 
   def main(args: Array[String]): Unit = {
-    val r = orclave {
-      orcExpr {
-        val a = delayedValue(1000, 1)
-        val b = delayedValueO(1000, 2)
-        val c = delayedValue(1000, 3)
-        a + b + c + scalaclave(10)
-      }
+    val o = orcExpr[Int] {
+      //val a = delayedValue(1000, 1)
+      val b = scalaExpr(delayedValue(1000, 2))
+      //val c = delayedValue(1000, 3)
+      scalaExpr(orcToBeLifted(b) + orcToBeLifted(b)) // + a + c + scalaclave(10)
     }
+    val r = orclave { o }
     println(r.toList)
   }
 }

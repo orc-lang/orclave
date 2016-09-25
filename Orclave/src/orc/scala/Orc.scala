@@ -167,7 +167,7 @@ object Orc extends OrcLowPriorityImplicits {
     * This triggers Orc macro expansion without executing it or creating an
     * iterable from the publications.
     */
-  def orcExpr[T](o: => T): Orc[T] = macro impl.OrcMacro.orcExpr
+  def orcExpr[T](o: => Orc[T]): Orc[T] = macro impl.OrcMacro.orcExpr
 
   /** Alternative syntax for graft.
     */
@@ -185,7 +185,7 @@ object Orc extends OrcLowPriorityImplicits {
     *
     * The returned Orc expression publishes the value of f once it has one and halts.
     */
-  implicit def variable[T](f: Future[T]): Orc[T] = new impl.Variable(f)
+  def variable[T](f: Future[T]): Orc[T] = new impl.Variable(f)
 }
 
 trait OrcLowPriorityImplicits {
@@ -193,10 +193,10 @@ trait OrcLowPriorityImplicits {
     *
     * The returned Orc expression publishes v and halts.
     */
-  implicit def scalaExpr[T](v: => T): Orc[T] = macro impl.OrcMacro.scalaExpr
+  def scalaExpr[T](v: => T): Orc[T] = macro impl.OrcMacro.scalaExpr
 
   @compileTimeOnly("[Orclave] Orc expression can only be used as Orc[T] outside an orclave. An expression was used as T.")
-  implicit def orcToBeLifted[T](o: Orc[T]): T = {
+  def orcToBeLifted[T](o: Orc[T]): T = {
     Logger.severe(s"orcToBeLifted should never appear in a compiled program. There is a bug in the macro.\n$o")
     throw new AssertionError("orcToBeLifted should never appear in a compiled program. There is a bug in the macro.")
   }

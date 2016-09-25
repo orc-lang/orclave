@@ -96,6 +96,16 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
   case object ScalaScope extends ScopeKind
   case object OrcScope extends ScopeKind
   case object FutureScope extends ScopeKind
+  
+  sealed trait OrclaveGenerated
+  object OrclaveGenerated extends OrclaveGenerated
+  
+  implicit class TreeAdds(val t: c.Tree) {
+    def setGenerated(): t.type = {
+      t.updateAttachment(OrclaveGenerated)
+      t
+    }
+  }
 
   /** Build a new ValDef to replace `s` which applies graft to the body.
     *
@@ -111,28 +121,29 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
     // Build new ValDef based on old
     val nestedExpr = if (tpt.isEmpty) rhs else q"$rhs: $tpt"
     val newS = ValDef(mods, name, TypeTree(), q"$nestedExpr.graft")
-    val newTpe = if (isOrcGraft) rhs.tpe.typeArgs.head else rhs.tpe
+    newS.setGenerated()
+    val tpe = if (isOrcGraft) rhs.tpe.widen.typeArgs.head else rhs.tpe
+    val newTpe = appliedType(GraftTypeConstructor, tpe)
     newS.setPos(s.pos)
     newS.setSymbol(s.symbol)
     if (newS.symbol != NoSymbol && newS.symbol != null)
-      newS.symbol.setInfo(appliedType(GraftTypeConstructor, newTpe))
+      newS.symbol.setInfo(newTpe)
     // TODO: Does this need to occur in a modified scope?
     val newS2 = recur(newS)
     val kind = (if (isOrcGraft) OrcScope else ScalaScope)
-    (newS2, kind, newTpe)
+    (newS2, kind, tpe)
   }
 
   /** Build a reference to the body of the graft represented as it's ValDef.
     */
   def buildGraftBodyRef(s: Tree): Tree = {
     val ValDef(_, n, _, _) = s
-    val x = s.symbol
-    val xi = if (s.symbol != NoSymbol) Ident(x) else Ident(n)
+    val xi = if (s.symbol != NoSymbol) Ident(s.symbol) else Ident(n)
     // TODO: Figure out why setType is needed. 
     // Without the inferred type is Int implying that somewhere the symbol or name in x is associated with it's old type.
     // The same problem appears in the Ident case below.
     if (s.symbol != NoSymbol)
-      xi.setType(x.info)
+      xi.setType(s.symbol.info)
     val r = q"${xi}.body"
     r.setPos(s.pos)
     r
@@ -151,7 +162,9 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
       }
     val tpe = if (_tpe != null) _tpe else
       s match {
-        case Left(s)  => s.info
+        case Left(s) =>
+          assume(s.info.typeConstructor == GraftTypeConstructor)
+          s.info.typeArgs.head
         case Right(n) => NoType
       }
 
@@ -162,7 +175,7 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
 
     // TODO: Figure out why setType is needed. 
     if (tpe != NoType)
-      i.setType(tpe)
+      i.setType(appliedType(GraftTypeConstructor, tpe))
     val r = k match {
       case ScalaScope =>
         q"$qOrcMacroInternal.futureToBeLifted(${i}.future)"
@@ -216,17 +229,24 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
 
             val origTpe = tree.tpe
 
+            var treeToBuildGraftBody = Vector[Tree]()
+            
             // Replace vals
             val newStats = for (s @ ValDef(mods, name, tpt, rhs) <- stats) yield {
-              val (t, k, _) = buildGraftValDef(s, recur)
-              // Mark this definition as being a graft variable
-              graftVariables += (name -> k)
-              t
+              if (mods.hasFlag(Flag.SYNTHETIC) || s.attachments.get[OrclaveGenerated].isDefined)
+                s // Do not mess with synthetic vals
+              else {
+                val (t, k, _) = buildGraftValDef(s, recur)
+                // Mark this definition as being a graft variable
+                graftVariables += (name -> k)
+                treeToBuildGraftBody :+= t
+                t
+              }
             }
             // Recur on expression then build the new expression
             // TODO: Does this need to occur in a modified scope?
             val expr2 = recur(expr)
-            val newExpr = newStats.foldLeft(expr2)((e, vl) => {
+            val newExpr = treeToBuildGraftBody.foldLeft(expr2)((e, vl) => {
               val r = q"$e.|||(${buildGraftBodyRef(vl)})"
               r.setPos(e.pos)
               r
@@ -249,9 +269,9 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
       }
     }
 
-    //println(s"Phase 1 IN:\n$o")
+    println(s"orcExpr IN:\n$o")
     val res = typingTransform(o)(transformFunc)
-    //println(s"Phase 1 OUT:\n$res")
+    println(s"orcExpr OUT:\n$res")
     res
   }
 
@@ -261,7 +281,7 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
     */
   def scalaExpr(v: Tree): Tree = {
     // TODO: Could generate an anonymous subclass to avoid megamorphic call sites at a code size cost
-    //println(s"Phase 2 IN:\n$v")
+    println(s"scalaExpr IN:\n$v")
 
     // 1: Perform ANF transformation on v
     // 2: Perform graft conversion on the created vals (using code shared with orclave macro)
@@ -284,7 +304,8 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
 
           // Build graft operation for Orc expression
           val n = freshName(TermName("_tmpgraft"))
-          val vl = ValDef(NoMods, n, TypeTree(), q"$e")
+          val vl = ValDef(Modifiers(Flag.SYNTHETIC), n, TypeTree(), q"$e")
+          vl.setGenerated()
           val sym = newTermSymbol(enclosingOwner, n)
           vl.setSymbol(sym)
           val (vl1, OrcScope, tpe) = buildGraftValDef(vl)
@@ -293,6 +314,7 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
           // Place graft body so that it can be put in parallel with the expression.
           parallelExpressions :+= buildGraftBodyRef(vl1)
 
+          assert(tpe == tree.tpe)
           // Build forcing operation for the new graft.
           val fn = freshName(TermName("_forcedval"))
           val fsym = newTermSymbol(enclosingOwner, fn)
@@ -301,7 +323,7 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
           forcePairs :+= (toForce -> (fsym, tpe))
 
           // Mark this tree as replaced by a specific symbol reference.
-          tree.updateAttachment(ReplacementTree(q"$fsym"))
+          tree.updateAttachment(ReplacementTree(Ident(fsym)))
 
         case Apply(TypeApply(callee @ Select(_, n), _), List(e)) if n == TermName("futureToBeLifted") =>
           //println(s"future: $e", tree.pos)
@@ -313,7 +335,7 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
           forcePairs :+= (toForce -> (fsym, tree.tpe))
 
           // Mark this tree as replaced by a specific symbol reference.
-          tree.updateAttachment(ReplacementTree(q"$fsym"))
+          tree.updateAttachment(ReplacementTree(Ident(fsym)))
 
         case t =>
           super.traverse(t)
@@ -358,16 +380,16 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
         lazy val tParam = ValDef(Modifiers(Flag.PARAM), t, TypeTree(), EmptyTree)
         lazy val forceBinders: Vector[Tree] = forceResultVars.zipWithIndex.map(p => {
           val ((rv, rt), i) = p
-          ValDef(Modifiers(), rv.name, TypeTree(rt), q"$t.${TermName(s"_${i + 1}")}")
-          //val r = Bind(x.name, pq"_ : ${TypeTree(x.info)}")
-          //r.setSymbol(x)
-          //r
+          val r = ValDef(Modifiers(Flag.SYNTHETIC), rv.name, TypeTree(rt), q"$t.${TermName(s"_${i + 1}")}")
+          r.setGenerated()
+          r.setSymbol(rv)
+          r
         })
         q"""
-        $qvariable($qFutureUtil.tuple(..$toFutures)).map(($tParam) => { 
+        $qvariable($qFutureUtil.tuple(..$toFutures)).map(($tParam) => ${ownerSplice(q"""{ 
           ..$forceBinders;
-          ${ownerSplice(core)}
-        })"""
+          $core
+        }""")})"""
     }
 
     lazy val orcInner1: Tree = q"$orcInner : $tqOrc[${v.tpe}]"
@@ -380,7 +402,7 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
 
     val newExpr = Block(leadingStatements.toList, orcInner2)
 
-    println(s"Phase 2 OUT:\n$newExpr")
+    println(s"scalaExpr OUT:\n$newExpr")
 
     newExpr
   }
