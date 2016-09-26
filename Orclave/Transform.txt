@@ -1,0 +1,188 @@
+Transform rules:
+
+The transform function trans(e) is defined as follows.
+trans(e) is a Scala expression with type Orc[T] where e has type Future[T], Orc[T], or simply T.
+trans is pretty straight forwardly structurally recursive.
+
+------
+
+Constant Expression or Variable: (for c with Orc type)
+c
+   ========>
+c
+
+------
+
+Constant Expression or Variable: (for c with non-Future non-Orc type)
+c
+   ========>
+scalaExpr(c)
+
+------
+
+Constant Expression or Variable: (for c with Future type)
+c
+   ========>
+variable(c)
+
+------
+
+Apply Expression: (for f without Orc[_] return type, and without Future[_] parameters)
+f(b1, ..., bn)
+   ========>
+{
+  val fb1 = trans(b1).graft
+  ...
+  val fbn = trans(bn).graft
+  variable(FutureUtil.tuple(fb1.future, ..., fbn.future)).map((p) =>
+    val ffb1 = p._1
+    ...
+    val ffbn = p._n
+    scalaExpr(f(ffb1, ..., ffbn))
+  ) ||| fb1.body ||| ... ||| fbn.body
+}
+
+------
+
+Apply Expression: (for f with Orc[_] return type, and without Future[_] parameters)
+f(b1, ..., bn)
+   ========>
+{
+  val fb1 = trans(b1).graft
+  ...
+  val fbn = trans(bn).graft
+  variable(FutureUtil.tuple(fb1.future, ..., fbn.future)).map((p) =>
+    val ffb1 = p._1
+    ...
+    val ffbn = p._n
+    f(ffb1, ..., ffbn)
+  ) ||| fb1.body ||| ... ||| fbn.body
+}
+
+------
+
+Apply Expression: (for f with Orc[_] return type, and with Future[_] parameters)
+f(b1, ..., bn)
+   ========>
+{
+  val fb1 = trans(b1).graft
+  ...
+  val fbn = trans(bn).graft
+  f(fb1.future, ..., fbn.future) ||| fb1.body ||| ... ||| fbn.body
+}
+
+------
+
+Apply Expression: (for f without Orc[_] return type, and with Future[_] parameters)
+f(b1, ..., bn)
+   ========>
+{
+  val fb1 = trans(b1).graft
+  ...
+  val fbn = trans(bn).graft
+  scalaExpr(f(fb1.future, ..., fbn.future)) ||| fb1.body ||| ... ||| fbn.body
+}
+
+------
+
+Apply Expression: (for f with Future[_] return type)
+f(b1, ..., bn)
+   ========>
+As Orc[_] return case except with variable used to convert Future return value.
+
+------
+
+Select and Apply Expression:
+a.f(b1, ..., bn)
+   ========>
+Just as f'(a, b1, ..., bn) for an appropriate f' which calls a.f(b1, ..., bn).
+
+------
+
+Select Expression:
+a.f
+   ========>
+Just as f'(a) for an appropriate f' which returns a.f.
+Fields of type Future or Orc are handled like return values of those types.
+
+------
+
+Val:
+{
+  <non-synthetic> val x = a
+  ...
+  b
+}
+   ========>
+{
+  val x = trans(a).graft
+  ...
+  trans(b[x |-> x.future, ...]) ||| x.body ||| ...
+}
+
+NOTE: The type of x.future must be known to the recursive trans call so it can be translated to a variable reference as needed or used a future.
+
+------
+
+Branch, parallel, otherwise, and trim use congruence rules.
+Calls on Orc objects or the Orc object are not handled as normal calls.
+They are ignored and passed through. This one case should handle many of the combinators.
+
+------
+
+Def: (Orc or Future may not appear in any of the types.)
+def f(x1: T1, ..., xn: Tn): R = a
+   ========>
+def f(x1: Future[T1], ..., xn: Future[Tn]): Orc[R] = trans(a)
+
+NOTE: The types visible in the recursive call must be the types of the new def.
+
+------
+
+Lambda: [Same as def]
+(x1: T1, ..., xn: Tn) => a
+   ========>
+(x1: Future[T1], ..., xn: Future[Tn]) => trans(a)
+
+NOTE: The types visible in the recursive call must be the types of the new def.
+
+------
+
+This implements:
+* Parallel
+* Branch
+* Graft (hard)
+* Otherwise
+* Trim
+* Site Call Semantics (hard)
+* Def and Lambda
+
+Implementation Approach:
+
+Use a custom recursive functions which builds new trees only copying position information.
+All type information is lost.
+The function will fail with a compilation error on any unhandled cases.
+The macro will return a fully untyped tree and use no symbols (or maybe new symbols).
+This will avoid any type or other information leaking across from the old version to the new version.
+
+The downside of this approach is that the translation function must handle EVERY Scala IR node type that may appear in valid Orc code.
+This could be a problem depending on what node times appear in corner cases.
+Some troublesome cases (such as lazy val) will not be supported in Orc because they don't really make sense.
+This will simplify things somewhat.
+
+
+
+TODO (some may be easy, some will NOT be): if, match, try-catch-finally, throw
+
+Optimizations:
+
+* Force operations in Apply rules should avoid the additional graft when an argument has type Future.
+  It may be possible to eliminate processing of non-Orc non-Future types as well.
+
+Future Ideas:
+
+* Allow implicit conversions to an abstract Stream type to allow integration of other async APIs.
+  This would require that returned values from apply be checked for implicit conversion not just type.
+* Generate errors if explicit types with Orc or Future are used inside Orclave.
+
+Eventual TODO: site, orco classes, onidle.
