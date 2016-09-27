@@ -167,7 +167,7 @@ object Orc extends OrcLowPriorityImplicits {
     * This triggers Orc macro expansion without executing it or creating an
     * iterable from the publications.
     */
-  def orcExpr[T](o: => Orc[T]): Orc[T] = macro impl.OrcMacro.orcExpr
+  def orcExpr[T, R](o: => T)(implicit evidence: StripOrcConstructor[T, R]): Orc[R] = macro impl.OrcMacro.orcExpr
 
   /** Alternative syntax for graft.
     */
@@ -186,18 +186,55 @@ object Orc extends OrcLowPriorityImplicits {
     * The returned Orc expression publishes the value of f once it has one and halts.
     */
   def variable[T](f: Future[T]): Orc[T] = new impl.Variable(f)
-}
 
-trait OrcLowPriorityImplicits {
   /** Create an Orc constant expression.
     *
     * The returned Orc expression publishes v and halts.
     */
-  def scalaExpr[T](v: => T): Orc[T] = macro impl.OrcMacro.scalaExpr
+  def scalaExpr[T](v: => T): Orc[T] = new impl.ScalaExpr(() => v)
+}
 
-  @compileTimeOnly("[Orclave] Orc expression can only be used as Orc[T] outside an orclave. An expression was used as T.")
-  def orcToBeLifted[T](o: Orc[T]): T = {
-    Logger.severe(s"orcToBeLifted should never appear in a compiled program. There is a bug in the macro.\n$o")
-    throw new AssertionError("orcToBeLifted should never appear in a compiled program. There is a bug in the macro.")
+trait OrcLowPriorityImplicits {
+  // Integration of Orc with normal Scala types
+  @compileTimeOnly("[Orclave] Orc expression can only be used as Orc[T] outside an orclave. An Orc expression was used as T.")
+  implicit def orcInScalaContext[T](o: Orc[T]): T = {
+    Logger.severe(s"orcInScalaContext should never appear in a compiled program. There is a bug in the macro.\n$o")
+    throw new AssertionError("orcInScalaContext should never appear in a compiled program. There is a bug in the macro.")
+  }
+  
+  @compileTimeOnly("[Orclave] Orc operators can only be used on arbitrary values inside an orclave.")
+  implicit def scalaInOrcContext[T](o: T): Orc[T] = {
+    Logger.severe(s"scalaInOrcContext should never appear in a compiled program. There is a bug in the macro.\n$o")
+    throw new AssertionError("scalaInOrcContext should never appear in a compiled program. There is a bug in the macro.")
+  }
+
+  // TODO: Concider lifting these conversions to (especially future->scala) to a separate import. So as to avoid confusion who are not bringing along their own futures.
+  // Integration of Futures with Orc and Scala types
+  @compileTimeOnly("[Orclave] Orc Future[T] conversions can only be used inside an orclave. This is probably caused by importing Orc._ implicits outside an Orclave.")
+  implicit def futureInScalaContext[T](o: Future[T]): T = {
+    Logger.severe(s"futureInScalaContext should never appear in a compiled program. There is a bug in the macro.\n$o")
+    throw new AssertionError("futureInScalaContext should never appear in a compiled program. There is a bug in the macro.")
+  }
+  
+  @compileTimeOnly("[Orclave] Orc Future[T] conversions can only be used inside an orclave. This is probably caused by importing Orc._ implicits outside an Orclave.")
+  implicit def futureInOrcContext[T](o: Future[T]): Orc[T] = {
+    Logger.severe(s"futureInOrcContext should never appear in a compiled program. There is a bug in the macro.\n$o")
+    throw new AssertionError("futureInOrcContext should never appear in a compiled program. There is a bug in the macro.")
+  }
+
+  trait StripOrcConstructor[T, R]
+
+  object StripOrcConstructor extends StripOrcConstructorLowPriority {
+    @compileTimeOnly("[Orclave] ICE: Bug in Orclave macro.")
+    implicit def OrcEvidence[T]: StripOrcConstructor[Orc[T], T] = null
+    @compileTimeOnly("[Orclave] ICE: Bug in Orclave macro.")
+    implicit def FutureEvidence[T]: StripOrcConstructor[Future[T], T] = null
+  }
+
+  trait StripOrcConstructorLowPriority {
+    @compileTimeOnly("[Orclave] ICE: Bug in Orclave macro.")
+    implicit def ScalaEvidence[T]: StripOrcConstructor[T, T] = null
   }
 }
+
+

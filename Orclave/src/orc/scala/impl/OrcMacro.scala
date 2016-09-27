@@ -4,6 +4,7 @@ import scala.reflect.macros.blackbox.Context
 import orc.scala.Orc
 import scala.concurrent.Future
 import scala.annotation.compileTimeOnly
+import orc.util.ListExtensions._
 import scala.language.experimental.macros
 
 object OrcMacroInternal {
@@ -18,392 +19,366 @@ object OrcMacroInternal {
 /*
  * General principles for macro writing:
  * 
- * - Insert types manual if you have them (setType).
+ * - Either be totally typed or totally untyped.
+ * - U: Always reconstruct every tree without copying symbols or anything
+ * - T: Insert types manual if you have them (setType).
  * - Always set position if possible.
- * - Always type check as you go using typedTransform.
- * - Process elements in order (since typing has side effects.
- * - Remember that trees have types that can be different from the symbol to which they refer.
+ * - T: Always type check as you go using typedTransform.
+ * - T: Process elements in order (since typing has side effects).
+ * - T: Remember that trees have types that can be different from the symbol to which they refer.
  */
 
 class OrcMacro(val c: Context) extends OwnerSplicer {
-  /* Transformations:
-   * 
-   * Introduce futures:
-   * 
-   * val x1 = e1
-   * ...
-   * val xn = en
-   * f
-   * 
-   *   ====>
-   * 
-   * val x1 = e1
-   * ...
-   * val xn = en
-   * x1.body ||| ... ||| xn.body |||
-   * [xi |-> xi.future]f
-   * 
-   * Lift Futures: (some args may be non-future)
-   * 
-   * f(e1: Future[T1], ..., en: Future[Tn])
-   * 
-   *   ====>
-   * 
-   * variable(FutureUtil.tuple(e1, ..., en)).map(t => {
-   *   val (y1, ..., yn) = t
-   *   f(y1, ..., yn) 
-   * })
-   * 
-   * Lift Orcs: (some args may of other kinds handled in their appropriate way)
-   * 
-   * f(e1: Orc[T1], ..., en: Orc[Tn])
-   * 
-   *   ====>
-   * 
-   * val x1 = e1.graft
-   * x1.body ||| ... ||| xn.body |||
-   * variable(FutureUtil.tuple(x1.future, ..., xn.future)).map(t => {
-   *   val (y1, ..., yn) = t
-   *   f(y1, ..., yn) 
-   * })
-   * 
-   */
-
-  // TODO: future forcing, especially at non-Orc calls.
-  // TODO: Handle references to variables from outside the orclave correctly. This should include handling futures. 
-
   import c._
   import c.universe._
   //import compat._
   import c.internal._
   import c.internal.decorators._
 
-  val qOrcMacroInternal = q"_root_.orc.scala.impl.OrcMacroInternal"
-  val qorcToBeLifted = q"_root_.orc.scala.Orc.orcToBeLifted"
-  val qvariable = q"_root_.orc.scala.Orc.variable"
-  val tqScalaExpr = tq"_root_.orc.scala.impl.ScalaExpr"
+  object TypeTrees {
+    val ScalaExpr = typecheck(tq"_root_.orc.scala.impl.ScalaExpr", TYPEmode)
+    val Orc = typecheck(tq"_root_.orc.scala.Orc", TYPEmode)
+    val OrcSym = Orc.symbol
+    val OrcLowPriorityImplicits = typecheck(tq"_root_.orc.scala.OrcLowPriorityImplicits", TYPEmode)
+    val OrcLowPriorityImplicitsSym = OrcLowPriorityImplicits.symbol
+    val Future = typecheck(tq"_root_.scala.concurrent.Future", TYPEmode)
+    val FutureSym = Future.symbol
+    val Graft = typecheck(tq"_root_.orc.scala.Graft", TYPEmode)
+    val GraftSym = Graft.symbol
+  }
 
-  val qFutureUtil = reify(orc.scala.impl.FutureUtil).tree
-  val tqOrc = tq"_root_.orc.scala.Orc"
+  object Constants {
+    import TypeTrees._
+    val OrcMacroInternal = q"_root_.orc.scala.impl.OrcMacroInternal"
+    val orcInScalaContext = q"_root_.orc.scala.Orc.orcInScalaContext"
+    val orcInScalaContextSym = OrcLowPriorityImplicitsSym.info.member(TermName("orcInScalaContext"))
+    val futureInScalaContextSym = OrcLowPriorityImplicitsSym.info.member(TermName("futureInScalaContext"))
+    val futureInOrcContextSym = OrcLowPriorityImplicitsSym.info.member(TermName("futureInOrcContext"))
+    val scalaInOrcContext = q"_root_.orc.scala.Orc.scalaInOrcContext"
+    val scalaInOrcContextSym = OrcLowPriorityImplicitsSym.info.member(TermName("scalaInOrcContext"))
+    val Orc_mapSym = OrcSym.info.member(TermName("map"))
+    val variable = q"_root_.orc.scala.Orc.variable"
+    val scalaExpr = q"_root_.orc.scala.Orc.scalaExpr"
+    val FutureUtil = reify(orc.scala.impl.FutureUtil).tree
+  }
 
-  val OrcTypeConstructor = c.typeOf[Orc[Int]].typeConstructor
-  val FutureTypeConstructor = c.typeOf[Future[Int]].typeConstructor
-  val GraftTypeConstructor = c.typeOf[orc.scala.Graft[Int]].typeConstructor
+
+  object Types {
+    val Orc = c.typeOf[orc.scala.Orc[Unit]].typeConstructor
+    val Future = c.typeOf[scala.concurrent.Future[Unit]].typeConstructor
+    val Graft = c.typeOf[orc.scala.Graft[Unit]].typeConstructor
+  }
 
   def println(s: String, pos: Position = enclosingPosition): Unit = c.echo(pos, s)
 
-  sealed trait ScopeKind
-  case object ScalaScope extends ScopeKind
-  case object OrcScope extends ScopeKind
-  case object FutureScope extends ScopeKind
-  
+  sealed trait ValueKind
+  case object ScalaValue extends ValueKind
+  case object OrcValue extends ValueKind
+  case object FutureValue extends ValueKind
+  case object GraftValue extends ValueKind
+
+  object ValueKind {
+    /** Return the kind of value that matches this type.
+      */
+    def apply(tpe: Type): ValueKind = {
+      import TypeTrees._
+      tpe match {
+        case TypeRef(_, OrcSym, List(tArg)) =>
+          OrcValue
+        case TypeRef(_, FutureSym, List(tArg)) =>
+          FutureValue
+        case TypeRef(_, GraftSym, List(tArg)) =>
+          GraftValue
+        case _ =>
+          ScalaValue
+      }
+    }
+  }
+
   sealed trait OrclaveGenerated
   object OrclaveGenerated extends OrclaveGenerated
-  
+
   implicit class TreeAdds(val t: c.Tree) {
     def setGenerated(): t.type = {
       t.updateAttachment(OrclaveGenerated)
       t
     }
   }
-
-  /** Build a new ValDef to replace `s` which applies graft to the body.
-    *
-    * `recur` is the is called on the new body expression.
-    *
-    * Returns the ValDef tree, the scope that usages are expected to have, and
-    * the type of publications/bindings of the graft.
-    */
-  def buildGraftValDef(s: ValDef, recur: Tree => Tree = (x => x)): (Tree, ScopeKind, Type) = {
-    val ValDef(mods, name, tpt, rhs) = s
-    // Check if type is an Orc already
-    val isOrcGraft = rhs.tpe.typeConstructor == OrcTypeConstructor
-    // Build new ValDef based on old
-    val nestedExpr = if (tpt.isEmpty) rhs else q"$rhs: $tpt"
-    val newS = ValDef(mods, name, TypeTree(), q"$nestedExpr.graft")
-    newS.setGenerated()
-    val tpe = if (isOrcGraft) rhs.tpe.widen.typeArgs.head else rhs.tpe
-    val newTpe = appliedType(GraftTypeConstructor, tpe)
-    newS.setPos(s.pos)
-    newS.setSymbol(s.symbol)
-    if (newS.symbol != NoSymbol && newS.symbol != null)
-      newS.symbol.setInfo(newTpe)
-    // TODO: Does this need to occur in a modified scope?
-    val newS2 = recur(newS)
-    val kind = (if (isOrcGraft) OrcScope else ScalaScope)
-    (newS2, kind, tpe)
-  }
-
-  /** Build a reference to the body of the graft represented as it's ValDef.
-    */
-  def buildGraftBodyRef(s: Tree): Tree = {
-    val ValDef(_, n, _, _) = s
-    val xi = if (s.symbol != NoSymbol) Ident(s.symbol) else Ident(n)
-    // TODO: Figure out why setType is needed. 
-    // Without the inferred type is Int implying that somewhere the symbol or name in x is associated with it's old type.
-    // The same problem appears in the Ident case below.
-    if (s.symbol != NoSymbol)
-      xi.setType(s.symbol.info)
-    val r = q"${xi}.body"
-    r.setPos(s.pos)
-    r
-  }
-
-  /** Build a reference to the graft future of `s` (the graft ValDef).
-    *
-    * @param k  Specify if the returned expression should be for Scala (type T) or Orc (type Orc[T]).
-    * @param _i An Ident to reuse and get position from. If it is not specified a new Ident is created.
-    */
-  def buildGraftFutureRef(s: Either[Symbol, TermName], k: ScopeKind, _tpe: Type = null, _i: Ident = null) = {
-    val i = if (_i != null) _i else
-      s match {
-        case Left(s)  => Ident(s)
-        case Right(n) => Ident(n)
-      }
-    val tpe = if (_tpe != null) _tpe else
-      s match {
-        case Left(s) =>
-          assume(s.info.typeConstructor == GraftTypeConstructor)
-          s.info.typeArgs.head
-        case Right(n) => NoType
-      }
-
-    assume(s match {
-      case Left(s)  => s == i.symbol
-      case Right(n) => n == i.name
-    })
-
-    // TODO: Figure out why setType is needed. 
-    if (tpe != NoType)
-      i.setType(appliedType(GraftTypeConstructor, tpe))
-    val r = k match {
-      case ScalaScope =>
-        q"$qOrcMacroInternal.futureToBeLifted(${i}.future)"
-      case OrcScope =>
-        q"$qvariable(${i}.future)"
-      case FutureScope =>
-        q"${i}.future"
-    }
-    r.setPos(if (_i != null) i.pos else enclosingPosition)
-    r
-  }
-
-  def orcExprJunk(o: Tree): Tree = {
-    val e = q"""
-    {
-      val t = 10;
-      t
-    }"""
-    // Adding "typecheck" around e causes a failure. Why?
-    val r = typecheck(e)
-    println(s"r = $r")
-    r
-    //orcExpr1(o)
-  }
-
-  /** Phase 1: Transform all defs to their Orc form.
-    */
-  def orcExpr(o: Tree): Tree = {
-    var graftVariables = Map[TermName, ScopeKind]()
-    def transformFunc(tree: Tree, api: TypingTransformApi) = {
-      import api._
-      tree match {
-        case Block(stats, expr) => {
-          // Check for non-definition expressions in the block.
-          for (s <- stats if !s.isDef) {
-            error(s.pos, "[Orclave] Expression results cannot be ignored in Orc.")
-          }
-
-          // Check for non-val definitions since we don't support them yet.
-          for (s <- stats) {
-            s match {
-              case ValDef(_, _, _, _) => ()
-              case s if s.isDef =>
-                error(s.pos, "[Orclave] Currently only val declarations are supported in Orc.")
-              case _ => ()
-            }
-          }
-
-          if (true) {
-            // If there are no errors yet do the actual transform.
-
-            val origTpe = tree.tpe
-
-            var treeToBuildGraftBody = Vector[Tree]()
-            
-            // Replace vals
-            val newStats = for (s @ ValDef(mods, name, tpt, rhs) <- stats) yield {
-              if (mods.hasFlag(Flag.SYNTHETIC) || s.attachments.get[OrclaveGenerated].isDefined)
-                s // Do not mess with synthetic vals
-              else {
-                val (t, k, _) = buildGraftValDef(s, recur)
-                // Mark this definition as being a graft variable
-                graftVariables += (name -> k)
-                treeToBuildGraftBody :+= t
-                t
-              }
-            }
-            // Recur on expression then build the new expression
-            // TODO: Does this need to occur in a modified scope?
-            val expr2 = recur(expr)
-            val newExpr = treeToBuildGraftBody.foldLeft(expr2)((e, vl) => {
-              val r = q"$e.|||(${buildGraftBodyRef(vl)})"
-              r.setPos(e.pos)
-              r
-            })
-            // Rebuild the block
-            val r = Block(newStats, newExpr)
-            //println(s"> Running typecheck on: $r")
-            // TODO: Does this need to occur in a modified scope?
-            val rr = typecheck(r)
-            //println(s"< Done running typecheck on: $rr")
-            rr
-          } else {
-            default(tree)
-          }
-        }
-        case i @ Ident(n) if n.isTermName && (graftVariables contains n.toTermName) =>
-          // For any variable that has been graft converted update the type and wrap for correct typing. 
-          typecheck(buildGraftFutureRef(Left(i.symbol), graftVariables(n.toTermName), _i = i))
-        case t => default(t)
+  implicit class TypeAdds(val t: c.Type) {
+    def withoutKind: Type = {
+      import TypeTrees._
+      t match {
+        case TypeRef(_, OrcSym, List(tArg)) =>
+          tArg
+        case TypeRef(_, FutureSym, List(tArg)) =>
+          tArg
+        case TypeRef(_, GraftSym, List(tArg)) =>
+          tArg
+        case _ =>
+          t
       }
     }
 
-    println(s"orcExpr IN:\n$o")
-    val res = typingTransform(o)(transformFunc)
-    println(s"orcExpr OUT:\n$res")
-    res
+    def withKind(k: ValueKind): Type = {
+      import TypeTrees._
+      k match {
+        case OrcValue =>
+          appliedType(OrcSym, withoutKind)
+        case FutureValue =>
+          appliedType(FutureSym, withoutKind)
+        case GraftValue =>
+          appliedType(GraftSym, withoutKind)
+        case ScalaValue =>
+          t
+      }
+    }
+
+    def kind: ValueKind = ValueKind(t)
   }
 
-  case class ReplacementTree(t: Tree)
-
-  /** Phase 2: Lift references to Orc and Future in scala expressions using forces.
+  /** Transform a Scala tree representing Orc code into an implementation of that Orc.
+    *
+    * transform should always return a tree that will be typed to Orc[T] for T being the type
+    * of the provided tree with any Future or Orc constructor removed.
+    *
     */
-  def scalaExpr(v: Tree): Tree = {
-    // TODO: Could generate an anonymous subclass to avoid megamorphic call sites at a code size cost
-    println(s"scalaExpr IN:\n$v")
+  case class OrcTransformer() extends ((Tree, TypingTransformApi) => Tree) {
+    /* Transformations are documented in Orclave/Transform.txt
+     * 
+     * They fall into several categories:
+     * + Constants and variables
+     * + Applications
+     * - Graft
+     * - Def
+     * + Congruence on calls to Orc
+     */
+    
+    // TODO: This uses untypecheck. 
+    // While lazy will be disallowed anyway and case classes don't seem useful, match destructors seem important eventually. 
 
-    // 1: Perform ANF transformation on v
-    // 2: Perform graft conversion on the created vals (using code shared with orclave macro)
-    // 3: Build force operations for each graft body
+    def buildKindConvertion(sk: ValueKind, tk: ValueKind)(t: Tree): Tree = {
+      import Constants._
+      (sk, tk) match {
+        case (k1, k2) if k1 == k2 => t
+        case (ScalaValue, OrcValue) =>
+          q"$scalaExpr($t)"
+        case (FutureValue, OrcValue) =>
+          q"$variable($t)"
+        case _ =>
+          throw new IllegalArgumentException(s"Illegal conversion requested: from $sk to $tk")
+      }
+    }
 
-    // TODO: For now we are only doing step 3. The other steps should probably be separate.
+    /** Argument lifting into grafts for the given arguments.
+      *
+      * The type information is used for correctly selecting kind conversion for
+      * arguments and results.
+      *
+      * @param argss     The argument trees for the function call.
+      * @param argTypess The argument types for the function.
+      * @param returnType The returned type for the function.
+      * @param coreFunc  Given a list of trees of the appropriate kinds build the call. The provided trees will not be typed.
+      */
+    def buildApply(argss: List[List[Tree]], argTypess: List[List[Type]], returnType: Type, pos: Position)(coreFunc: List[List[Tree]] => Tree): Tree = {
+      // TODO: Support mixed argument kinds
+      val argKindss = argTypess.innerMap(ValueKind(_))
+      val argKind = argKindss.head.head
+      assert(argKindss.flatten.forall(_ == argKind))
+      val returnKind = ValueKind(returnType)
 
-    // TODO: For each reference to an something that needs forcing collect information and generate a force operation using FutureUtil.tuple.
-    //       For Orc reference we will need to build a graft of sorts, but it may be able to be simplified. 
+      def argRelatedNames(kind: String): List[List[TermName]] = argss innerMap { a =>
+        val s =
+          if (a.symbol != null && a.symbol != NoSymbol)
+            a.symbol.name.toString()
+          else
+            "expr"
+        freshName(TermName(s"_${s}_$kind"))
+      }
+      val graftNames = argRelatedNames("graft")
 
-    var leadingStatements = Vector[Tree]()
-    var parallelExpressions = Vector[Tree]()
-    var forcePairs = Vector[(Tree, (TermSymbol, Type))]()
-    val expressionCollector = new Traverser {
-      override def traverse(tree: Tree): Unit = tree match {
-        case Apply(TypeApply(callee @ Select(_, n), _), List(e)) if n == TermName("orcToBeLifted") =>
-          //println(s"orc: $e", tree.pos)
-          if (currentOwner != enclosingOwner)
-            error(e.pos, s"Orclave cannot handle orc expressions in this position (should be under $enclosingOwner, was under $currentOwner)")
+      val graftValDefs = (argss innerZip graftNames innerZip argTypess).flatten.map { p =>
+        val ((arg, name), tpe) = p
+        // Usually correct type: tpe.widen.withKind(GraftValue)
+        // However this type seems to sometimes contain type variables
+        val r = ValDef(Modifiers(Flag.SYNTHETIC), name, TypeTree(), q"${recur(arg)}.graft")
+        r.setGenerated()
+        r.setPos(arg.pos)
+        r
+      }
 
-          // Build graft operation for Orc expression
-          val n = freshName(TermName("_tmpgraft"))
-          val vl = ValDef(Modifiers(Flag.SYNTHETIC), n, TypeTree(), q"$e")
-          vl.setGenerated()
-          val sym = newTermSymbol(enclosingOwner, n)
-          vl.setSymbol(sym)
-          val (vl1, OrcScope, tpe) = buildGraftValDef(vl)
-          leadingStatements :+= vl1
+      val futureRefs = graftNames.innerMap { (a: TermName) => q"$a.future" }
+      val bodyRefs = graftNames.flatten.map { a => q"$a.body" }
 
-          // Place graft body so that it can be put in parallel with the expression.
-          parallelExpressions :+= buildGraftBodyRef(vl1)
+      def convertCore(t: Tree) = buildKindConvertion(returnKind, OrcValue)(t)
 
-          assert(tpe == tree.tpe)
-          // Build forcing operation for the new graft.
-          val fn = freshName(TermName("_forcedval"))
-          val fsym = newTermSymbol(enclosingOwner, fn)
-          fsym.setInfo(tpe)
-          val toForce = buildGraftFutureRef(Left(sym), FutureScope, _tpe = tpe)
-          forcePairs :+= (toForce -> (fsym, tpe))
+      val forceAndCall: Tree = argKind match {
+        case FutureValue =>
+          convertCore(coreFunc(futureRefs))
+        case ScalaValue =>
+          futureRefs.flatten match {
+            case Seq() =>
+              coreFunc(futureRefs)
+            case Seq(f) =>
+              val forcedNames = argRelatedNames("forced")
+              val forcedName = forcedNames.flatten.head
+              val futureRef = futureRefs.flatten.head
+              q"""
+              ${Constants.variable}($futureRef).map((${ValDef(Modifiers(Flag.PARAM), forcedName, TypeTree(), EmptyTree)}) => { 
+                ${convertCore(coreFunc(forcedNames.innerMap(a => q"$a")))}
+              })
+              """
+            case toFutures =>
+              val forcedNames = argRelatedNames("forced")
+              lazy val t = freshName(TermName("_tuple"))
+              lazy val tParam = ValDef(Modifiers(Flag.PARAM), t, TypeTree(), EmptyTree)
+              lazy val forceBinders = forcedNames.flatten.zipWithIndex.map(p => {
+                val (n, i) = p
+                val r = ValDef(Modifiers(Flag.SYNTHETIC), n, TypeTree(), q"$t.${TermName(s"_${i + 1}")}")
+                r.setGenerated()
+                r
+              })
+              q"""
+              ${Constants.variable}(${Constants.FutureUtil}.tuple(..${futureRefs.flatten})).map(($tParam) => { 
+                ..$forceBinders;
+                ${convertCore(coreFunc(forcedNames.innerMap(a => q"$a")))}
+              })
+              """
+          }
+        case OrcValue =>
+          error(pos, "Orc[_] argument types are not usable from within an Orclave.")
+          coreFunc(futureRefs.innerMap((f: Tree) => q"${Constants.variable}($f)"))
+        case GraftValue =>
+          error(pos, "Graft[_] argument types are not usable from within an Orclave.")
+          coreFunc(futureRefs.innerMap((f: Tree) => q"???"))
+      }
 
-          // Mark this tree as replaced by a specific symbol reference.
-          tree.updateAttachment(ReplacementTree(Ident(fsym)))
+      lazy val forceCallAndBodies: Tree = bodyRefs.foldLeft(forceAndCall)((e, f) => {
+        val r = q"$e.|||($f)"
+        r.setPos(pos)
+        r
+      })
 
-        case Apply(TypeApply(callee @ Select(_, n), _), List(e)) if n == TermName("futureToBeLifted") =>
-          //println(s"future: $e", tree.pos)
-          // Build forcing operation for future.
-          val fn = freshName(TermName("_forcedval"))
-          val fsym = newTermSymbol(enclosingOwner, fn)
-          fsym.setInfo(e.tpe.typeArgs.head)
-          val toForce = q"$e"
-          forcePairs :+= (toForce -> (fsym, tree.tpe))
+      q"""
+      {
+        ..$graftValDefs; 
+        $forceCallAndBodies
+      }
+      """
+    }
 
-          // Mark this tree as replaced by a specific symbol reference.
-          tree.updateAttachment(ReplacementTree(Ident(fsym)))
+    val excludedClasses = {
+      import TypeTrees._
+      Set(OrcLowPriorityImplicitsSym, OrcSym, FutureSym)
+    }
 
+    def shouldBeLifted(sym: Symbol): Boolean = {
+      //val s = f.symbol
+      if (sym.isPackage || sym.isModule || sym.isClass) {
+        false
+      } else if (sym.isMethod) {
+        val s = sym.asMethod
+        val cls = s.owner
+        !(excludedClasses contains cls)
+      } else
+        true
+    }
+    def shouldBeLifted(t: Tree): Boolean = {
+      assume(t.symbol != null && t.symbol != NoSymbol)
+      shouldBeLifted(t.symbol)
+    }
+    
+    var currentApi: TypingTransformApi = _
+    
+    def recur(tree: Tree) = {
+      apply(tree, currentApi)
+    }
+
+    def typecheck(tree: Tree) = {
+      currentApi.typecheck(tree)
+    }
+    
+    val typeFixerSymbols =  {
+      import Constants._
+      Set(
+        futureInOrcContextSym,
+        scalaInOrcContextSym,
+        futureInScalaContextSym,
+        orcInScalaContextSym
+        )
+    }
+
+    def apply(tree: Tree, api: TypingTransformApi): Tree = {
+      import Constants._, TypeTrees._
+      assert(currentApi == null || currentApi == api)
+      currentApi = api
+      import api.{default, atOwner, currentOwner}
+
+      val currentPos = tree.pos
+      val result = tree match {
+        // Remove type fixers
+        case q"${ f @ q"$prefix.$n" }[$_]($e)" if typeFixerSymbols contains f.symbol =>
+          //println(s"orcInScalaContext $orcInScalaContext $e ${showRaw(tree)}")
+          recur(e)
+        
+        // Handle literals and variables
+        case Literal(Constant(_)) | Ident(_) | This(_) =>
+          def rebuilt: Tree = tree match {
+            case Literal(Constant(v)) =>
+              Literal(Constant(v))
+            case Ident(n) =>
+              Ident(n)
+            case This(n) =>
+              This(n)
+          }
+          try {
+            buildKindConvertion(ValueKind(tree.tpe), OrcValue)(rebuilt)
+          } catch {
+            case _: IllegalArgumentException =>
+              throw new IllegalArgumentException(s"OrcTransform cannot transform Graft[_] values\n${showRaw(tree)}")
+          }
+        
+        // Special congruence rule for branch (map)
+        case q"${callee @ q"$prefix.$f"}[..$targs](${lambda @ q"($x) => $e"})" if callee.symbol == Orc_mapSym =>
+          //println(s"Call ${callee.symbol} $lambda")
+          val e1 = atOwner(lambda, currentOwner) { recur(e) }
+          // This untypecheck should always be safe because none of the problem cases are in argument positions.
+          q"${recur(prefix)}.$f[..$targs]((${untypecheck(x)}) => ${e1})"
+        
+        // Rules for handling calls.
+        case q"${ f @ Ident(n) }[..$targs](...$argss)" =>
+          //println(s"Call ${f.symbol} $n $argss")
+          // TODO: The types provided here are not instantiated for based on the targs. That should be done before passing them here.
+          if (shouldBeLifted(f))
+            buildApply(argss, f.tpe.paramLists.innerMap(_.info), f.tpe.finalResultType, currentPos)(argss => q"${Ident(n)}[..$targs](...$argss)")
+          else
+            untypecheck(default(tree))
+        case q"${ f @ q"$prefix.$n" }[..$targs](...$argss)" =>
+          //println(s"Call ${f.symbol} $prefix $n $argss")
+          if (shouldBeLifted(f))
+            buildApply(List(prefix) :: argss, List(prefix.tpe) :: f.tpe.paramLists.innerMap(_.info), f.tpe.finalResultType, currentPos) {
+              argss =>
+                val List(p) :: realArgss = argss
+                q"$p.$n[..$targs](...$realArgss)"
+            }
+          else
+            untypecheck(default(tree))
+        
+        case t @ TypeTree() =>
+          t
         case t =>
-          super.traverse(t)
+          error(currentPos, s"Unsupported expression or statement in Orclave: ${showRaw(t)}")
+          t
       }
+      result.setPos(currentPos)
+      //println(s"$tree ===> $result")
+      result
     }
-    expressionCollector.atOwner(enclosingOwner) {
-      expressionCollector.traverse(v)
-    }
+  }
 
-    /*println(s"""Traversal results:
-      |leadingStatements = $leadingStatements
-      |parallelExpressions = $parallelExpressions
-      |forcePairs = $forcePairs
-      """.stripMargin)
-		*/
-    lazy val replacedV = typingTransform(v) { (tree, api) =>
-      import api._
-      tree.attachments.get[ReplacementTree] match {
-        case Some(ReplacementTree(t)) =>
-          typecheck(t.setPos(tree.pos))
-        case None =>
-          default(tree)
-      }
-    }
-
-    val (toFutures, forceResultVars) = forcePairs.unzip
-
-    lazy val core = q"new $tqScalaExpr(() => ${ownerSplice(replacedV)})"
-
-    lazy val orcInner: Tree = toFutures match {
-      case Seq() =>
-        core
-      case Seq(f) =>
-        val (rv, rt) = forceResultVars.head
-        lazy val rvParam = ValDef(Modifiers(Flag.PARAM), rv.name, TypeTree(), EmptyTree)
-        q"""
-        $qvariable($f).map(($rvParam) => { 
-          ${ownerSplice(core)}
-        })"""
-      case toFutures =>
-        lazy val t = freshName(TermName("_tmptuple"))
-        lazy val tParam = ValDef(Modifiers(Flag.PARAM), t, TypeTree(), EmptyTree)
-        lazy val forceBinders: Vector[Tree] = forceResultVars.zipWithIndex.map(p => {
-          val ((rv, rt), i) = p
-          val r = ValDef(Modifiers(Flag.SYNTHETIC), rv.name, TypeTree(rt), q"$t.${TermName(s"_${i + 1}")}")
-          r.setGenerated()
-          r.setSymbol(rv)
-          r
-        })
-        q"""
-        $qvariable($qFutureUtil.tuple(..$toFutures)).map(($tParam) => ${ownerSplice(q"""{ 
-          ..$forceBinders;
-          $core
-        }""")})"""
-    }
-
-    lazy val orcInner1: Tree = q"$orcInner : $tqOrc[${v.tpe}]"
-
-    lazy val orcInner2: Tree = parallelExpressions.foldLeft(orcInner1)((e, f) => {
-      val r = q"$e.|||($f)"
-      r.setPos(e.pos)
-      r
-    })
-
-    val newExpr = Block(leadingStatements.toList, orcInner2)
-
-    println(s"scalaExpr OUT:\n$newExpr")
-
-    newExpr
+  def orcExpr(o: Tree)(evidence: Tree): Tree = {
+    //println(s"Start:\n$o\n========")
+    val r = typingTransform(o)(OrcTransformer())
+    //println(s"Final:\n$r\n========")
+    r
   }
 }
