@@ -421,6 +421,21 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
 
       //println(s">> [${tree.kind} => {${allowedKinds.mkString(", ")}}] $tree")
       val currentPos = tree.pos
+
+      def handleApply(forig: Tree, f: Tree, targs: List[Tree], argss: List[List[Tree]], prefixArgs: List[List[Tree]], prefixArgTypes: List[List[Type]])(coreFunc: List[List[Tree]] => Tree) = {
+        if (isOrcPrimitive(forig)) {
+          q"$f[..$targs](...${argss.innerMap(recur(_, Set(OrcValue)))})".setKind(OrcValue)
+        } else if (allowedKinds contains OrcValue) {
+          buildApply(prefixArgs ::: argss, prefixArgTypes ::: forig.tpe.paramLists.innerMap(_.info), forig.tpe.finalResultType, OrcValue, currentPos)(coreFunc)
+        } else if (allowedKinds contains tree.kind) {
+          // Handle references that are not allowed to be Orc. Just hope all the subexpressions can be converted.
+          q"$f[..$targs](...${argss.innerMap(a => recur(a, Set(a.kind)))})".setKind(tree.kind)
+        } else {
+          error(tree.pos, s"ICE: Cannot build proper kind. $tree ${tree.kind} $allowedKinds")
+          q"$f[..$targs](...${argss.innerMap(a => recur(a, Set(a.kind)))})".setKind(tree.kind)
+        }
+      }
+
       val result = withIndent {
         val result = tree match {
           // Remove type fixers
@@ -478,37 +493,18 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
           // Rules for handling calls.
           case q"${ f @ Ident(n) }[..$targs](...$argss)" =>
             //println(s"Call ${f.symbol} $n $argss (${shouldBeLifted(f)})")
-            // TODO: The types provided here are not instantiated for based on the targs. That should be done before passing them here.          
-            if (isOrcPrimitive(f)) {
-              q"$f[..$targs](...${argss.innerMap(recur(_, Set(OrcValue)))})".setKind(OrcValue)
-            } else if (allowedKinds contains OrcValue) {
-              buildApply(argss, f.tpe.paramLists.innerMap(_.info), f.tpe.finalResultType, OrcValue, currentPos) {
-                argss => 
-                  q"${Ident(n)}[..$targs](...$argss)"
-              }
-            } else if (allowedKinds contains tree.kind) {
-              // Handle references that are not allowed to be Orc. Just hope all the subexpressions can be converted.
-              q"$f[..$targs](...${argss.innerMap(a => recur(a, Set(a.kind)))})".setKind(tree.kind)
-            } else {
-              error(tree.pos, s"ICE: Cannot build proper kind. $tree ${tree.kind} $allowedKinds")
-              q"$f[..$targs](...${argss.innerMap(a => recur(a, Set(a.kind)))})".setKind(tree.kind)
+            // TODO: The types provided here are not instantiated for based on the targs. That should be done before passing them here.
+            handleApply(f, f, targs, argss, Nil, Nil) {
+              argss => 
+                q"${Ident(n)}[..$targs](...$argss)"
             }
           case q"${ f @ q"$prefix.$n" }[..$targs](...$argss)" =>
             //println(s"Call ${f.symbol} $prefix $n $argss (${isOrcPrimitive(f)})\n${f.symbol.owner}")
-            if (isOrcPrimitive(f)) {
-              q"${recur(prefix, Set(prefix.kind))}.$n[..$targs](...${argss.innerMap(recur(_, Set(OrcValue)))})".setKind(OrcValue)
-            } else if (allowedKinds contains OrcValue) {
-              buildApply(List(prefix) :: argss, List(prefix.tpe) :: f.tpe.paramLists.innerMap(_.info), f.tpe.finalResultType, OrcValue, currentPos) {
-                argss =>
-                  val List(p) :: realArgss = argss
-                  q"$p.$n[..$targs](...$realArgss)"
-              }
-            } else if (allowedKinds contains tree.kind) {
-              // Handle references that are not allowed to be Orc. Just hope all the subexpressions can be converted.
-              q"${recur(prefix, Set(prefix.kind))}.$n[..$targs](...${argss.innerMap(a => recur(a, Set(a.kind)))})".setKind(tree.kind)
-            } else {
-              error(tree.pos, s"ICE: Cannot build proper kind. $tree ${tree.kind} $allowedKinds")
-              q"${recur(prefix, Set(prefix.kind))}.$n[..$targs](...${argss.innerMap(a => recur(a, Set(a.kind)))})".setKind(tree.kind)
+            val f1 = q"${recur(prefix, Set(prefix.kind))}.$n"
+            handleApply(f, f1, targs, argss, List(List(prefix)), List(List(prefix.tpe))) {
+              argss =>
+                val List(p) :: realArgss = argss
+                q"$p.$n[..$targs](...$realArgss)"
             }
           
           case t @ TypeTree() =>
