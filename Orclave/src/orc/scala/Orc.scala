@@ -87,6 +87,14 @@ trait Orc[+T] {
     */
   def branch[B](f: T => Orc[B]): Orc[B] = map(f)
 
+  /** Run `f` after this halts. Ignore publications of this.
+    */
+  def andthen[B](f: => Orc[B]): Orc[B] = silent.otherwise(f)
+
+  /** Ignore publications of this.
+    */
+  def silent: Orc[Nothing] = map(_ => Orc.stop)
+
   /** Convert this expression into a future which is bound to the first
     * publication of this.
     */
@@ -176,6 +184,10 @@ object Orc extends OrcLowPriorityImplicits {
   /** Alternative syntax for trim.
     */
   def trim[T](f: Orc[T]): Orc[T] = f.trim
+
+  /** Alternative syntax for silent.
+    */
+  def silence[T](f: Orc[T]): Orc[Nothing] = f.silent
 
   /** Embed a scala expression in an orclave.
     */
