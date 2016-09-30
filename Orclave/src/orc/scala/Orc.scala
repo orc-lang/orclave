@@ -23,9 +23,7 @@ import scala.annotation.compileTimeOnly
 import scala.language.experimental.macros
 import scala.language.implicitConversions
 
-// TODO: Once things are looking good set very simply macro requirements: transparent futures 
-//       are a first goal, then generating errors for code that drops values in the middle of 
-//       Orc code.
+// TODO: Add direct implementations of convience combinators.
 
 // TODO: Add version of otherwise that functions like catch and allows exceptions to be handled. 
 //       Normal halts would be given as a HaltedNormally sentinal value that is not of type Exception.
@@ -89,7 +87,7 @@ trait Orc[+T] {
 
   /** Run `f` after this halts. Ignore publications of this.
     */
-  def andthen[B](f: => Orc[B]): Orc[B] = silent.otherwise(f)
+  def andthen[B](f: Orc[B]): Orc[B] = silent.otherwise(f)
 
   /** Ignore publications of this.
     */
@@ -130,10 +128,12 @@ object Orc extends OrcLowPriorityImplicits {
 
   /** Execute an Orc expression eager/leniently.
     *
+    * The expression must already be an Orc[T] object.
+    * 
     * The returned iterable will contain all the publications of the expressions
     * as they become available. The iterable will end when the Orc expression halts.
     */
-  def orclave[T](o: Orc[T])(implicit ctx: OrcExecutionContext): Iterator[T] = {
+  def orcToBlockingIterable[T](o: Orc[T])(implicit ctx: OrcExecutionContext): Iterator[T] = {
     // TODO: This is messy. A custom iterator which iteracts directly with the Orc execution would be better.
     val chan = new Channel[Option[T]]()
     val iter = new Iterator[T]() {
@@ -169,6 +169,13 @@ object Orc extends OrcLowPriorityImplicits {
 
   // TODO: Figure out how to implement an async version of the interface to Orc expressions.
   //       It should enable polling and callbacks and the like. Maybe chained futures or similar.
+  
+  /** Execute an Orc expression eager/leniently.
+    *
+    * The returned iterable will contain all the publications of the expressions
+    * as they become available. The iterable will end when the Orc expression halts.
+    */
+  def orclave[T, R](o: T)(implicit ctx: OrcExecutionContext, evidence: StripOrcConstructor[T, R]): Iterator[R] = macro impl.OrcMacro.orclave
 
   /** Get an Orc expression directly without executing it.
     *
@@ -208,15 +215,13 @@ object Orc extends OrcLowPriorityImplicits {
 
 trait OrcLowPriorityImplicits {
   // Integration of Orc with normal Scala types
-  @compileTimeOnly("[Orclave] Orc expression can only be used as Orc[T] outside an orclave. An Orc expression was used as T.")
+  @compileTimeOnly("[Orclave] Orc expression can only be used as their underlying type inside an orclave. An Orc expression was used as T.")
   implicit def orcInScalaContext[T](o: Orc[T]): T = {
-    Logger.severe(s"orcInScalaContext should never appear in a compiled program. There is a bug in the macro.\n$o")
     throw new AssertionError("orcInScalaContext should never appear in a compiled program. There is a bug in the macro.")
   }
   
   @compileTimeOnly("[Orclave] Orc operators can only be used on arbitrary values inside an orclave.")
   implicit def scalaInOrcContext[T](o: T): Orc[T] = {
-    Logger.severe(s"scalaInOrcContext should never appear in a compiled program. There is a bug in the macro.\n$o")
     throw new AssertionError("scalaInOrcContext should never appear in a compiled program. There is a bug in the macro.")
   }
 
@@ -224,17 +229,15 @@ trait OrcLowPriorityImplicits {
   // Integration of Futures with Orc and Scala types
   @compileTimeOnly("[Orclave] Orc Future[T] conversions can only be used inside an orclave. This is probably caused by importing Orc._ implicits outside an Orclave.")
   implicit def futureInScalaContext[T](o: Future[T]): T = {
-    Logger.severe(s"futureInScalaContext should never appear in a compiled program. There is a bug in the macro.\n$o")
     throw new AssertionError("futureInScalaContext should never appear in a compiled program. There is a bug in the macro.")
   }
   
   @compileTimeOnly("[Orclave] Orc Future[T] conversions can only be used inside an orclave. This is probably caused by importing Orc._ implicits outside an Orclave.")
   implicit def futureInOrcContext[T](o: Future[T]): Orc[T] = {
-    Logger.severe(s"futureInOrcContext should never appear in a compiled program. There is a bug in the macro.\n$o")
     throw new AssertionError("futureInOrcContext should never appear in a compiled program. There is a bug in the macro.")
   }
 
-  trait StripOrcConstructor[T, R]
+  sealed trait StripOrcConstructor[T, R]
 
   object StripOrcConstructor extends StripOrcConstructorLowPriority {
     @compileTimeOnly("[Orclave] ICE: Bug in Orclave macro.")

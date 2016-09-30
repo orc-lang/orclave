@@ -62,6 +62,7 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
     val variable = q"_root_.orc.scala.Orc.variable"
     val scalaExpr = q"_root_.orc.scala.Orc.scalaExpr"
     val FutureUtil = reify(orc.scala.impl.FutureUtil).tree
+    val orcToBlockingIterable = q"_root_.orc.scala.Orc.orcToBlockingIterable"
   }
 
 
@@ -134,7 +135,8 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
       val attachedKind = t.attachments.get[ValueKind]
       val typeKind = Option(t.tpe).map(_.kind)
       val symbolKind = t match {
-        case Ident(n) if t.symbol != null && t.symbol != NoSymbol =>
+        // TODO: This should really only rule out getting the symbol kind from methods without argument lists.
+        case Ident(n) if t.symbol != null && t.symbol != NoSymbol && !t.symbol.isMethod =>
           Some(t.symbol.info.kind)
         case _ =>
           None
@@ -218,10 +220,12 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
      * They fall into several categories:
      * + Constants and variables
      * + Applications
-     * - Graft
-     * - Def
+     * + Graft
      * + Congruence on calls to Orc
+     * - scalaclaves
+     * - def
      */
+    // TODO: Finish todos above
     
     object Construct {
       def parallel(ts: Iterable[Tree]) = {
@@ -432,15 +436,15 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
       Map(OrcLowPriorityImplicitsSym -> ScalaValue, OrcSym -> OrcValue, FutureSym -> FutureValue, OrcObjSym -> ScalaValue)
     }
     
-    def kindForOrcPrimitive(sym: Symbol): ValueKind = {
+    def kindForOrcPrimitivePrefix(sym: Symbol): ValueKind = {
       assume(isOrcPrimitive(sym))
       val s = sym.asMethod
       val cls = s.owner
       kindMap(cls)
     }
-    def kindForOrcPrimitive(t: Tree): ValueKind = {
+    def kindForOrcPrimitivePrefix(t: Tree): ValueKind = {
       assume(t.symbol != null && t.symbol != NoSymbol)
-      kindForOrcPrimitive(t.symbol)
+      kindForOrcPrimitivePrefix(t.symbol)
     }
     
     var currentApi: TypingTransformApi = _
@@ -542,7 +546,7 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
               }
             }
             
-            //println(s"$tree: $sourceKind => $targetKind ($sym)")
+            //println(s"$tree: ${tree.tpe}: $sourceKind => $targetKind ($sym)")
             try {
               buildKindConvertion(sourceKind, targetKind)(rebuilt)
             } catch {
@@ -550,12 +554,12 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
                 throw new IllegalArgumentException(s"OrcTransform cannot transform Graft[_] values\n${showRaw(tree)}")
             }
           
-          // Special congruence rule for branch (map)
-          case q"${callee @ q"$prefix.$f"}[..$targs](${lambda @ q"($x) => $e"})" if callee.symbol == Orc_mapSym =>
+          // Special congruence rule for primitives with lambda arguments
+          case q"${callee @ q"$prefix.$f"}[..$targs](${lambda @ q"($x) => $e"})" if isOrcPrimitive(callee) =>
             //println(s"Call ${callee.symbol} $lambda")
             val e1 = atOwner(lambda, currentOwner) { recur(e, Set(OrcValue)) }
             // This untypecheck should always be safe because none of the problem cases are in argument positions.
-            q"${recur(prefix, Set(OrcValue))}.$f[..$targs]((${untypecheck(x)}) => ${e1})".setKind(OrcValue)
+            q"${recur(prefix, Set(kindForOrcPrimitivePrefix(callee)))}.$f[..$targs]((${untypecheck(x)}) => ${e1})".setKind(OrcValue)
           
           // Rules for handling calls.
           case q"${ f @ Ident(n) }[..$targs](...$argss)" =>
@@ -568,7 +572,7 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
           case q"${ f @ q"$prefix.$n" }[..$targs](...$argss)" =>
             val allowedPrefixKinds: Set[ValueKind] = {
               if (isOrcPrimitive(f))
-                Set(kindForOrcPrimitive(f))
+                Set(kindForOrcPrimitivePrefix(f))
               else if (allowedKinds contains OrcValue)
                 Set(OrcValue, FutureValue, ScalaValue)
               else
@@ -583,7 +587,7 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
             }
 
           // Rules for handling val in blocks
-          case q"{ ..$stats; $expr }" =>
+          case Block(stats, expr) =>
             assert(allowedKinds contains OrcValue)
             
             for (s <- stats) {
@@ -610,7 +614,8 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
             // Recur
             val newExpr = Construct.parallel(recur(expr, Set(OrcValue)) +: grafts.map(_._3.body))
             q"{ ..$newStats; $newExpr }".setKind(OrcValue)
-          
+            
+          // Things I don't care about and can pass through.
           case t @ TypeTree() =>
             t
           case t =>
@@ -638,5 +643,9 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
     val r = typingTransform(o)(OrcTransformer())
     //println(s"Final:\n$r\n========")
     r
+  }
+  def orclave(o: Tree)(ctx: Tree, evidence: Tree): Tree = {
+    val r = typingTransform(o)(OrcTransformer())
+    q"${Constants.orcToBlockingIterable}($r)($ctx)"
   }
 }

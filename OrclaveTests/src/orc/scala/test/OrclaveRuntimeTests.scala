@@ -8,55 +8,53 @@ import orc.scala._
 import scala.concurrent.Future
 import scala.concurrent.ExecutionContext
 
-class OrcRuntimeTests extends FlatSpec with Matchers {
+class OrclaveRuntimeTests extends FlatSpec with Matchers {
   implicit val ctx = OrcExecutionContext(ExecutionContext.global)
   
   
-  import Orc.{scalaclave, scalaExpr, orcToBlockingIterable, stop, variable, trim, graft}
+  import Orc._
   
-  import scala.language.implicitConversions
-  implicit def scalaToOrc[T](v: => T): Orc[T] = scalaExpr(v) 
-
   def badSleep(n: Long): Orc[Unit] = scalaclave(Thread.sleep(n))
+  def delayedValue[T](n: Long, v: T): T = { Thread.sleep(n); v }
+  
+  // TODO: Add scalaclave tests when they work.
 
-  "Orclave (manual code) runtime" should "execute constant expressions" in {
-    val r = orcToBlockingIterable { scalaExpr(1) }
+  "Orclave (macro code) runtime" should "execute constant expressions" in {
+    val r = orclave { 1 }
     r.toList should be(List(1))
   }
 
   it should "execute parallel constants" in {
-    val r = orcToBlockingIterable { scalaExpr(1) ||| scalaExpr(2) }
+    val r = orclave { 1 ||| 2 }
     r.toList should contain theSameElementsAs (List(1, 2))
   }
 
   it should "execute stop" in {
-    val r = orcToBlockingIterable { stop }
+    val r = orclave { stop }
     r.toList.size should be(0)
   }
 
   it should "execute side-effect at the correct time" in {
     var x = 0
-    val o = scalaExpr { x = 42 }
+    val o = scalaclave { x = 42 }
     x should be(0)
-    val r = orcToBlockingIterable(o)
+    val r = orclave(o)
     r.toSet should be(Set(()))
     x should be(42)
   }
 
   it should "execute graft" in {
     failAfter(10 seconds) {
-      val r = orcToBlockingIterable {
-        val x = (42).graft
-        x.body |||
-          variable(x.future)
+      val r = orclave {
+        val x = 42
+        x
       }
       r.toList should be(List(42))
     }
     failAfter(10 seconds) {
-      val r = orcToBlockingIterable {
-        val x = (stop).graft
-        x.body |||
-          variable(x.future)
+      val r = orclave {
+        val x = stop
+        x
       }
       r.toList should be(List())
     }
@@ -64,14 +62,14 @@ class OrcRuntimeTests extends FlatSpec with Matchers {
 
   it should "execute otherwise" in {
     failAfter(10 seconds) {
-      val r = orcToBlockingIterable {
-        stop otherwise scalaExpr(42)
+      val r = orclave {
+        stop otherwise 42
       }
       r.toList should be(List(42))
     }
     failAfter(10 seconds) {
-      val r = orcToBlockingIterable {
-        5 otherwise scalaExpr(42)
+      val r = orclave {
+        5 otherwise 42
       }
       r.toList should be(List(5))
     }
@@ -79,24 +77,24 @@ class OrcRuntimeTests extends FlatSpec with Matchers {
 
   it should "execute trim" in {
     failAfter(10 seconds) {
-      val r = orcToBlockingIterable {
-        trim { 1 ||| scalaExpr(2) }
+      val r = orclave {
+        trim { 1 ||| 2 }
       }
       val s = r.toList
       s.size should be(1)
       s should contain oneOf (1, 2)
     }
     failAfter(10 seconds) {
-      val r = orcToBlockingIterable {
-        trim { scalaclave({ Thread.sleep(100); 1 }) ||| scalaExpr(2) }
+      val r = orclave {
+        trim { delayedValue(100, 1) ||| 2 }
       }
       val s = r.toList
       s.size should be(1)
       s should contain(2)
     }
     failAfter(10 seconds) {
-      val r = orcToBlockingIterable {
-        trim { 1 ||| scalaclave({ Thread.sleep(100); 2 }) }
+      val r = orclave {
+        trim { 1 ||| delayedValue(100, 2) }
       }
       val s = r.toList
       s.size should be(1)
@@ -106,17 +104,17 @@ class OrcRuntimeTests extends FlatSpec with Matchers {
 
   it should "execute branch" in {
     failAfter(10 seconds) {
-      val r = orcToBlockingIterable {
+      val r = orclave {
         for (x <- 3) yield {
-          scalaExpr(x + 1)
+          x + 1
         }
       }
       r.toList should contain theSameElementsAs List(4)
     }
     failAfter(10 seconds) {
-      val r = orcToBlockingIterable {
-        for (x <- 1 ||| scalaExpr(2)) yield {
-          scalaExpr(x + 1)
+      val r = orclave {
+        for (x <- 1 ||| 2) yield {
+          x + 1
         }
       }
       r.toList should contain theSameElementsAs List(2, 3)
@@ -125,34 +123,25 @@ class OrcRuntimeTests extends FlatSpec with Matchers {
 
   it should "execute branch on future" in {
     failAfter(10 seconds) {
-      val r = orcToBlockingIterable {
-        val x = badSleep(100).graft
-        x.body ||| scalaExpr(1) ||| {
-          for (_ <- variable(x.future)) yield {
-            scalaExpr(4)
+      val r = orclave {
+        val x = badSleep(100)
+        1 ||| {
+          for (_ <- x) yield {
+            4
           }
         }
       }
       r.toList should be(List(1, 4))
     }
     failAfter(10 seconds) {
-      val r = orcToBlockingIterable {
-        val x = badSleep(100).graft
-        x.body ||| {
-          for (_ <- variable(x.future)) yield {
-            scalaExpr(4)
+      val r = orclave {
+        val x = badSleep(100)
+        
+        {
+          for (_ <- x) yield {
+            4
           }
-        } ||| scalaExpr(1)
-      }
-      r.toList should be(List(1, 4))
-    }
-    failAfter(10 seconds) {
-      val r = orcToBlockingIterable {
-        val x = badSleep(100).graft
-        (
-          for (_ <- variable(x.future)) yield {
-            scalaExpr(4)
-          }) ||| scalaExpr(1) ||| x.body
+        } ||| 1
       }
       r.toList should be(List(1, 4))
     }
@@ -160,22 +149,22 @@ class OrcRuntimeTests extends FlatSpec with Matchers {
 
   it should "execute branch with sleep" in {
     failAfter(10 seconds) {
-      val r = orcToBlockingIterable {
+      val r = orclave {
         1 ||| {
           for (_ <- badSleep(100)) yield {
-            scalaExpr(4)
+            4
           }
         }
       }
       r.toList should be(List(1, 4))
     }
     failAfter(10 seconds) {
-      val r = orcToBlockingIterable {
+      val r = orclave {
         {
           for (_ <- badSleep(100)) yield {
-            scalaExpr(4)
+            4
           }
-        } ||| scalaExpr(1)
+        } ||| 1
       }
       r.toList should be(List(1, 4))
     }
@@ -183,22 +172,22 @@ class OrcRuntimeTests extends FlatSpec with Matchers {
 
   it should "execute otherwise with sleep" in {
     failAfter(10 seconds) {
-      val r = orcToBlockingIterable {
+      val r = orclave {
         1 ||| {
           (for (_ <- badSleep(100)) yield {
             stop
-          }) otherwise scalaExpr(3)
+          }) otherwise 3
         }
       }
       r.toList should be(List(1, 3))
     }
     failAfter(10 seconds) {
-      val r = orcToBlockingIterable {
+      val r = orclave {
         {
           (for (_ <- badSleep(100)) yield {
             stop
-          }) otherwise scalaExpr(3)
-        } ||| scalaExpr(1)
+          }) otherwise 3
+        } ||| 1
       }
       r.toList should be(List(1, 3))
     }
@@ -206,26 +195,26 @@ class OrcRuntimeTests extends FlatSpec with Matchers {
 
   it should "execute parallel with sleep" in {
     failAfter(10 seconds) {
-      val r = orcToBlockingIterable {
+      val r = orclave {
         (for (_ <- badSleep(100) ||| badSleep(100) ||| badSleep(100)) yield {
-          scalaExpr(1)
+          1
         }) ||| {
           (for (_ <- badSleep(200)) yield {
-            scalaExpr(5)
+            5
           })
         }
       }
       r.toList should be(List(1, 1, 1, 5))
     }
     failAfter(10 seconds) {
-      val r = orcToBlockingIterable {
+      val r = orclave {
         {
           (for (_ <- badSleep(200)) yield {
-            scalaExpr(5)
+            5
           })
         } |||
           (for (_ <- badSleep(100) ||| badSleep(100) ||| badSleep(100)) yield {
-            scalaExpr(1)
+            1
           })
       }
       r.toList should be(List(1, 1, 1, 5))
@@ -235,11 +224,12 @@ class OrcRuntimeTests extends FlatSpec with Matchers {
   it should "execute trim with sleep" in {
     failAfter(10 seconds) {
       var x = 0
-      val r = orcToBlockingIterable {
+      def f() = scalaclave { x = 1 }
+      val r = orclave {
         trim {
           1 ||| {
             for (_ <- badSleep(100)) yield {
-              scalaExpr(x = 1)
+              f()
             }
           }
         }
@@ -250,13 +240,14 @@ class OrcRuntimeTests extends FlatSpec with Matchers {
     }
     failAfter(10 seconds) {
       var x = 0
-      val r = orcToBlockingIterable {
+      def f = scalaclave { x = 1 }
+      val r = orclave {
         trim {
           {
             (for (_ <- badSleep(100)) yield {
-              scalaExpr(x = 1)
+              f
             })
-          } ||| scalaExpr(1)
+          } ||| 1
         }
       }
       x should be(0)
@@ -265,16 +256,17 @@ class OrcRuntimeTests extends FlatSpec with Matchers {
     }
     failAfter(10 seconds) {
       var x = 0
-      val r = orcToBlockingIterable {
+      def f = scalaclave { x = 1 }
+      val r = orclave {
         trim {
           {
             (for (_ <- badSleep(200)) yield {
-              scalaExpr(x = 1)
+              f
             })
           } |||
             {
               (for (_ <- badSleep(100)) yield {
-                scalaExpr(1)
+                1
               })
             }
         }
@@ -287,7 +279,7 @@ class OrcRuntimeTests extends FlatSpec with Matchers {
 
   it should "kill scala sleep in trim" in {
     failAfter(10 seconds) {
-      val r = orcToBlockingIterable {
+      val r = orclave {
         ({
           for (
             _ <- trim {
@@ -295,9 +287,9 @@ class OrcRuntimeTests extends FlatSpec with Matchers {
             }
           ) yield stop
         } otherwise {
-          scalaExpr(1)
+          1
         }) ||| (for (_ <- badSleep(100)) yield {
-          scalaExpr(2)
+          2
         })
       }
       r.toList should be(List(1, 2))
@@ -307,34 +299,46 @@ class OrcRuntimeTests extends FlatSpec with Matchers {
   it should "interrupt scala code in trim" in {
     failAfter(10 seconds) {
       var exc: Exception = null
-      val r = orcToBlockingIterable {
-        trim {
-          (for (_ <- badSleep(100)) yield scalaExpr(())) ||| scalaclave {
-            val o = new Object()
-            try {
-              o.synchronized { o.wait() }
-            } catch {
-              case e: Exception =>
-                exc = e
-            }
+      def f1 = {
+        scalaclave {
+          val o = new Object()
+          try {
+            o.synchronized { o.wait() }
+          } catch {
+            case e: Exception =>
+              exc = e
           }
         }
       }
+      exc shouldBe null
+      val r = orclave {
+        trim {
+          (for (_ <- badSleep(100)) yield ()) ||| f1
+        }
+      }
       r.toList should be(List(()))
+      // Sleep a little to make sure the kill actually happened.
+      Thread.sleep(100)
       exc shouldBe a[InterruptedException]
     }
     failAfter(10 seconds) {
       var interrupted = false
-      val r = orcToBlockingIterable {
-        trim {
-          (for (_ <- badSleep(100)) yield scalaExpr(())) ||| scalaclave {
-            while (!interrupted) {
-              interrupted = Thread.interrupted()
-            }
+      def f2 = {
+        scalaclave {
+          while (!interrupted) {
+            interrupted = Thread.interrupted()
           }
         }
       }
+      interrupted should be(false)
+      val r = orclave {
+        trim {
+          (for (_ <- badSleep(100)) yield ()) ||| f2
+        }
+      }
       r.toList should be(List(()))
+      // Sleep a little to make sure the kill actually happened.
+      Thread.sleep(100)
       interrupted should be(true)
     }
   }
