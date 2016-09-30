@@ -100,7 +100,7 @@ class Graft[T](e: Orc[T]) extends orc.scala.Graft[T] with Terminatable {
       ctx.terminator.addChild(Graft.this)
       // TODO: Check
       try {
-        e.execute(promise.success)(ctx.withCounter(newCounter))
+        e.execute(promise.trySuccess)(ctx.withCounter(newCounter))
       } finally {
         newCounter.halt()
       }
