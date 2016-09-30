@@ -72,6 +72,7 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
   }
 
   var currentIndent = 0
+  var currentPos = enclosingPosition
   def withIndent[T](f: => T): T = {
     currentIndent += 2
     try {
@@ -80,7 +81,18 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
       currentIndent -= 2
     }
   }
-  def println(s: String, pos: Position = enclosingPosition): Unit = c.echo(pos, " "*(currentIndent*2) + s)
+  def withIndent[T](t: Position)(f: => T): T = {
+    currentIndent += 2
+    val oldPos = currentPos
+    currentPos = t
+    try {
+      f
+    } finally {
+      currentIndent -= 2
+      currentPos = oldPos
+    }
+  }
+  def println(s: String, pos: Position = currentPos): Unit = c.echo(pos, " "*(currentIndent*2) + s)
 
   sealed trait ValueKind
   case object ScalaValue extends ValueKind
@@ -121,16 +133,27 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
     def kind: ValueKind = {
       val attachedKind = t.attachments.get[ValueKind]
       val typeKind = Option(t.tpe).map(_.kind)
-      (attachedKind, typeKind) match {
-        case (Some(k1), Some(k2)) if k1 == k2 =>
+      val symbolKind = t match {
+        case Ident(n) if t.symbol != null && t.symbol != NoSymbol =>
+          Some(t.symbol.info.kind)
+        case _ =>
+          None
+      }
+      // If we have the symbol kind use that, otherwise use attached/type kind if they agree otherwise use whatever we have.
+      (attachedKind, typeKind, symbolKind) match {
+        case (k1, k2, Some(k3)) =>
+          if(k3 != FutureValue && k2 != Some(k3) && k1 != Some(k3))
+            info(t.pos, s"ICE: Kind should only be overriden to future (used by graft). ($k1, $k2, $k3)", true)
+          k3
+        case (Some(k1), Some(k2), _) if k1 == k2 =>
           k1
-        case (Some(k1), Some(k2)) =>
+        case (Some(k1), Some(k2), _) =>
           throw new IllegalStateException(s"Kinds ($k1, $k2) disagree on $t.")
-        case (Some(k1), _) =>
+        case (Some(k1), _, _) =>
           k1
-        case (_, Some(k1)) =>
+        case (_, Some(k1), _) =>
           k1
-        case (None, None) =>
+        case (None, None, None) =>
           throw new IllegalStateException(s"Kind unknown (no type or kind set): $t")
       }
     }
@@ -200,6 +223,16 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
      * + Congruence on calls to Orc
      */
     
+    object Construct {
+      def parallel(ts: Iterable[Tree]) = {
+        ts.reduceLeft((e, a) => {
+          val r = q"$e.|||($a)"
+          r.setPos(a.pos)
+          r
+        })
+      }
+    }
+    
     // TODO: This uses untypecheck. 
     // While lazy will be disallowed anyway and case classes don't seem useful, match destructors seem important eventually. 
 
@@ -217,6 +250,39 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
       r.setKind(tk)
       r
     }
+
+    /** Return the set of kinds that this expression is convertable to.
+     */
+    def convertableTo(t: Tree): Set[ValueKind] = {
+      if (t.symbol != null && t.symbol.isPackage) {
+        Set(ScalaValue)
+      } else {
+        Set(OrcValue, FutureValue, ScalaValue)
+      }
+    }
+    
+    
+    abstract class GraftPatternBase(graftBody: Tree, tpe: Type) {
+      assume(graftBody.kind == OrcValue)
+      
+      val graftName: TermName
+      
+      lazy val valDef = {
+        // Usually correct type: tpe.widen.withKind(GraftValue)
+        // However this type seems to sometimes contain type variables
+        // TODO: Fix this to generate type annotation. Need to fix issue in apply cases first.
+        val r = ValDef(Modifiers(Flag.SYNTHETIC), graftName, TypeTree(), q"$graftBody.graft")
+        r.setGenerated()
+        r.setPos(graftBody.pos)
+        r
+      }
+      def futureExpr = q"$graftName.future"
+      def body = q"$graftName.body"
+      
+      override def toString(): String = s"GraftPattern(..., $graftName, $tpe)"
+    }
+    
+    case class GraftPattern(graftBody: Tree, graftName: TermName, tpe: Type) extends GraftPatternBase(graftBody, tpe)
 
     /** Argument lifting into grafts for the given arguments.
       *
@@ -259,21 +325,8 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
         val forcedName: TermName = freshRefName("forced")
         def argumentExpr = q"$forcedName" 
       }
-      case class GraftArg(graftBody: Tree, name: String, tpe: Type) extends Argument with ForcedArg {
-        assume(graftBody.kind == OrcValue)
-        val graftName: TermName = freshRefName("graft")
-        lazy val valDef = {
-          // Usually correct type: tpe.widen.withKind(GraftValue)
-          // However this type seems to sometimes contain type variables
-          // TODO: Fix this to generate type annotation. Need to fix issue in apply cases first.
-          val r = ValDef(Modifiers(Flag.SYNTHETIC), graftName, TypeTree(), q"$graftBody.graft")
-          r.setGenerated()
-          r.setPos(graftBody.pos)
-          r
-        }
-        def futureExpr = q"$graftName.future"
-        def body = q"$graftName.body"
-        
+      case class GraftArg(graftBody: Tree, name: String, tpe: Type) extends GraftPatternBase(graftBody, tpe) with Argument with ForcedArg {
+        val graftName = freshRefName("graft")
         override def toString(): String = s"GraftArg(..., $name, $tpe)"
       }
       case class ScalaArg(scalaExpr: Tree, name: String) extends Argument {
@@ -343,17 +396,12 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
       
       lazy val graftArgs = arguments.flatten.collect { case g: GraftArg => g }
       
-      lazy val forceCoreBodies: Tree = graftArgs.foldLeft(forceCore)((e, a) => {
-        val r = q"$e.|||(${a.body})"
-        r.setPos(pos)
-        r
-      })
+      assert(expectedKind == OrcValue)
+      lazy val forceCoreBodies: Tree = Construct.parallel(forceCore +: graftArgs.map(_.body))
       
-      lazy val graftValDefs = graftArgs.map(_.valDef)
-
       val r = q"""
       {
-        ..$graftValDefs; 
+        ..${graftArgs.map(_.valDef)}; 
         $forceCoreBodies
       }
       """
@@ -377,6 +425,22 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
     def isOrcPrimitive(t: Tree): Boolean = {
       assume(t.symbol != null && t.symbol != NoSymbol)
       isOrcPrimitive(t.symbol)
+    }
+    
+    val kindMap = {
+      import TypeTrees._
+      Map(OrcLowPriorityImplicitsSym -> ScalaValue, OrcSym -> OrcValue, FutureSym -> FutureValue, OrcObjSym -> ScalaValue)
+    }
+    
+    def kindForOrcPrimitive(sym: Symbol): ValueKind = {
+      assume(isOrcPrimitive(sym))
+      val s = sym.asMethod
+      val cls = s.owner
+      kindMap(cls)
+    }
+    def kindForOrcPrimitive(t: Tree): ValueKind = {
+      assume(t.symbol != null && t.symbol != NoSymbol)
+      kindForOrcPrimitive(t.symbol)
     }
     
     var currentApi: TypingTransformApi = _
@@ -413,13 +477,16 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
      * 
      * 
      */
-    def apply(tree: Tree, api: TypingTransformApi, allowedKinds: Set[ValueKind]): Tree = {
+    def apply(tree: Tree, api: TypingTransformApi, extAllowedKinds: Set[ValueKind]): Tree = {
+      assume(!extAllowedKinds.isEmpty)
       import Constants._, TypeTrees._
       assert(currentApi == null || currentApi == api)
       currentApi = api
       import api.{default, atOwner, currentOwner}
+      
+      val allowedKinds = convertableTo(tree) intersect extAllowedKinds
+      assert(!allowedKinds.isEmpty)
 
-      //println(s">> [${tree.kind} => {${allowedKinds.mkString(", ")}}] $tree")
       val currentPos = tree.pos
 
       def handleApply(forig: Tree, f: Tree, targs: List[Tree], argss: List[List[Tree]], prefixArgs: List[List[Tree]], prefixArgTypes: List[List[Type]])(coreFunc: List[List[Tree]] => Tree) = {
@@ -436,7 +503,8 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
         }
       }
 
-      val result = withIndent {
+      //println(s">> [${tree.kind} => {${allowedKinds.mkString(", ")}} (from ${extAllowedKinds.mkString(", ")}})] $tree", currentPos)
+      val result = withIndent(currentPos) {
         val result = tree match {
           // Remove type fixers
           case q"${ f @ q"$prefix.$n" }[$_]($e)" if typeFixerSymbols contains f.symbol =>
@@ -445,7 +513,6 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
           
           // Handle literals and variables
           case Literal(Constant(_)) | Ident(_) | This(_) =>
-            // TODO: This is not handling package and object referneces properly. I think special handling of constants may not be an optimization. It might be a core semantic element.
             val (rebuilt: Tree, sym) = tree match {
               case Literal(Constant(v)) =>
                 (tree, NoSymbol)
@@ -499,32 +566,69 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
                 q"${Ident(n)}[..$targs](...$argss)"
             }
           case q"${ f @ q"$prefix.$n" }[..$targs](...$argss)" =>
+            val allowedPrefixKinds: Set[ValueKind] = {
+              if (isOrcPrimitive(f))
+                Set(kindForOrcPrimitive(f))
+              else if (allowedKinds contains OrcValue)
+                Set(OrcValue, FutureValue, ScalaValue)
+              else
+                Set(f.kind)
+            }
             //println(s"Call ${f.symbol} $prefix $n $argss (${isOrcPrimitive(f)})\n${f.symbol.owner}")
-            val f1 = q"${recur(prefix, Set(prefix.kind))}.$n"
+            val f1 = q"${recur(prefix, allowedPrefixKinds)}.$n"
             handleApply(f, f1, targs, argss, List(List(prefix)), List(List(prefix.tpe))) {
               argss =>
                 val List(p) :: realArgss = argss
                 q"$p.$n[..$targs](...$realArgss)"
             }
+
+          // Rules for handling val in blocks
+          case q"{ ..$stats; $expr }" =>
+            assert(allowedKinds contains OrcValue)
+            
+            for (s <- stats) {
+              s match {
+                case q"val $x: $t = $e" =>
+                  ()
+                case _ =>
+                  // TODO: Add advice for running statement after.
+                  error(s.pos, s"Statements (other than vals) are not supported in Orclaves. Use val _ = [stat] to run your statement in parallel or [stat] andthen ... to run in sequence.")
+              }
+            }
+
+            // Build graft pattern for each
+            val grafts = for (s @ q"val $x: $t = $e" <- stats) yield {
+              (s, x, GraftPattern(recur(e, Set(OrcValue)), freshName(TermName(x + "_graft")), e.tpe))
+            }
+            // Build a pair of vals for each
+            val newStats = grafts.flatMap { p =>
+              val (origS, name, pat) = p
+              // Mark the symbol we are replacing as having a future type
+              origS.symbol.setInfo(origS.symbol.info.withKind(FutureValue))
+              Seq(pat.valDef, ValDef(Modifiers(Flag.SYNTHETIC), name, TypeTree(), pat.futureExpr).setGenerated())
+            }
+            // Recur
+            val newExpr = Construct.parallel(recur(expr, Set(OrcValue)) +: grafts.map(_._3.body))
+            q"{ ..$newStats; $newExpr }".setKind(OrcValue)
           
           case t @ TypeTree() =>
             t
           case t =>
-            error(currentPos, s"Unsupported expression or statement in Orclave: ${showRaw(t)}")
+            error(currentPos, s"Unsupported expression in Orclave: ${showRaw(t)}")
             t
         }
         try {
           if(!(allowedKinds contains result.kind)) {
-            println(s"Kind not in allowed set: ${result.kind} not in $allowedKinds", currentPos)
+            println(s"Kind not in allowed set: ${result.kind} not in $allowedKinds")
           }
         } catch {
           case _: IllegalStateException =>
-          println(s"Result does not have a kind: $result", currentPos)
+            println(s"Result does not have a kind: $result")
         }
         result
       }
       result.setPos(currentPos)
-      //println(s"<< [${tree.kind} => ${result.kindOpt.getOrElse("?")}] ===> $result")
+      //println(s"<< [${tree.kind} => ${result.kindOpt.getOrElse("?")}] ===> $result", currentPos)
       result
     }
   }

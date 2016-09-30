@@ -26,13 +26,16 @@ object TestApp {
     val o2 = orcExpr(o1)
     val o3 = orcExpr(f)
     val o = orcExpr {
-      add1(1) |||
-        methadd1(1) |||
-        {
-          (for (_ <- (for (n <- delayedValueO(500, 3) ||| delayedValue(1000, 4) ||| 5 ||| f ||| x) yield println(s"Print: ${(42 + n + f)}"))) yield stop) otherwise
-            5
-        }
+      //add1(1) |||
+      //methadd1(1) |||
+      //{
+      //  (for (_ <- (for (n <- delayedValueO(500, 3) ||| delayedValue(1000, 4) ||| 5 ||| f ||| x) yield println(s"Print: ${(42 + n + f)}"))) yield stop) otherwise
+      //    5
+      //}
       //add2(1)(add1(1))
+      val s = 1 ||| 2 ||| (delayedValueO(500, 3) andthen silence { println("Test") })
+      //val s = trim { 1 }
+      s + 5
     }
     val r = orclave { o }
     for (p <- r) {
