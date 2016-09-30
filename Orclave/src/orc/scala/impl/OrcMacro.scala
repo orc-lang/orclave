@@ -28,7 +28,7 @@ object OrcMacroInternal {
  * - T: Remember that trees have types that can be different from the symbol to which they refer.
  */
 
-class OrcMacro(val c: Context) extends OwnerSplicer {
+class OrcMacro(val c: Context) {
   import c._
   import c.universe._
   //import compat._
