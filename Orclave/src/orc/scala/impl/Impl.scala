@@ -21,6 +21,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import scala.util.Success
 import scala.util.Failure
 
+// TODO: Expressions are not always terminating properly after a trim.
+
 class Parallel[T](l: Orc[T], r: Orc[T]) extends Orc[T] {
   def execute(p: PublicationCont[T])(implicit ctx: OrcExecutionContext): Unit = {
     // TODO: Check
@@ -60,11 +62,14 @@ class Otherwise[T](l: Orc[T], r: Orc[T]) extends Orc[T] {
     val newCounter = new CounterNested(ctx.counter, onHalt)
 
     // TODO: check
-    l.execute(v => {
-      hasPublished.set(true)
-      p(v)
-    })(ctx.withCounter(newCounter))
-    newCounter.halt()
+    try {
+      l.execute(v => {
+        hasPublished.set(true)
+        p(v)
+      })(ctx.withCounter(newCounter))
+    } finally {
+      newCounter.halt()
+    }
   }
 }
 
@@ -80,7 +85,7 @@ class Trim[T](e: Orc[T]) extends Orc[T] {
   }
 }
 
-class Graft[T](e: Orc[T]) extends orc.scala.Graft[T] {
+class Graft[T](e: Orc[T]) extends orc.scala.Graft[T] with Terminatable {
   val promise = Promise[T]()
 
   def future = promise.future
@@ -89,12 +94,21 @@ class Graft[T](e: Orc[T]) extends orc.scala.Graft[T] {
     def execute(p: PublicationCont[Nothing])(implicit ctx: OrcExecutionContext): Unit = {
       def onHalt() = {
         promise.tryFailure(HaltException.SINGLETON)
+        ctx.terminator.removeChild(Graft.this)
       }
       val newCounter = new CounterNested(ctx.counter, onHalt)
+      ctx.terminator.addChild(Graft.this)
       // TODO: Check
-      e.execute(promise.success)(ctx.withCounter(newCounter))
-      newCounter.halt()
+      try {
+        e.execute(promise.success)(ctx.withCounter(newCounter))
+      } finally {
+        newCounter.halt()
+      }
     }
+  }
+  
+  def kill(): Unit = {
+    promise.tryFailure(KilledException.SINGLETON)
   }
 }
 
@@ -122,10 +136,21 @@ class Variable[T](fut: Future[T]) extends Orc[T] {
     ctx.prepareSpawn()
     fut.onComplete {
       case Success(x) =>
-        p(x)
-        ctx.halt()
+        try {
+          try {
+            p(x)
+          } finally {
+            ctx.halt()
+          }
+        } catch {
+          case _: KilledException => ()
+        }
       case Failure(e) =>
-        ctx.halt()
+        try {
+          ctx.halt()
+        } catch {
+          case _: KilledException => ()
+        }
     }
   }
 }

@@ -25,12 +25,14 @@ class OrcExecutionContextWrapper(val counter: Counter, val terminator: Terminato
     prepare().execute(new Runnable() {
       def run() = {
         try {
-          task
+          try {
+            task
+          } finally {
+            // Matched to: prepareSpawn before execute
+            halt()
+          }
         } catch {
           case _: KilledException => ()
-        } finally {
-          // Matched to: prepareSpawn before execute
-          halt()
         }
       }
     })
