@@ -10,14 +10,11 @@ import scala.concurrent.ExecutionContext
 
 class OrclaveRuntimeTests extends FlatSpec with Matchers {
   implicit val ctx = OrcExecutionContext(ExecutionContext.global)
-  
-  
+
   import Orc._
-  
+
   def badSleep(n: Long): Orc[Unit] = scalaclave(Thread.sleep(n))
   def delayedValue[T](n: Long, v: T): T = { Thread.sleep(n); v }
-  
-  // TODO: Add scalaclave tests when they work.
 
   "Orclave (macro code) runtime" should "execute constant expressions" in {
     val r = orclave { 1 }
@@ -136,7 +133,7 @@ class OrclaveRuntimeTests extends FlatSpec with Matchers {
     failAfter(10 seconds) {
       val r = orclave {
         val x = badSleep(100)
-        
+
         {
           for (_ <- x) yield {
             4
@@ -340,6 +337,51 @@ class OrclaveRuntimeTests extends FlatSpec with Matchers {
       // Sleep a little to make sure the kill actually happened.
       Thread.sleep(100)
       interrupted should be(true)
+    }
+  }
+
+  it should "support simple scalaclaves" in {
+    failAfter(10 seconds) {
+      var exc: Exception = null
+      exc shouldBe null
+      val r = orclave {
+        trim {
+          (for (_ <- badSleep(100)) yield ()) ||| scalaclave {
+            val o = new Object()
+            try {
+              o.synchronized { o.wait() }
+            } catch {
+              case e: Exception =>
+                exc = e
+            }
+          }
+        }
+      }
+      r.toList should be(List(()))
+      // Sleep a little to make sure the kill actually happened.
+      Thread.sleep(100)
+      exc shouldBe a[InterruptedException]
+    }
+
+    failAfter(10 seconds) {
+      var x = 0
+      val r = orclave {
+        trim {
+          {
+            (for (_ <- badSleep(200)) yield {
+              scalaclave { x = 1 }
+            })
+          } |||
+            {
+              (for (_ <- badSleep(100)) yield {
+                1
+              })
+            }
+        }
+      }
+      x should be(0)
+      r.toList should be(List(1))
+      x should be(0)
     }
   }
 }

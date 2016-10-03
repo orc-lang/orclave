@@ -5,9 +5,34 @@ import scala.concurrent.ExecutionContext
 import scala.concurrent.Promise
 import scala.util.Success
 import scala.util.Failure
+import scala.collection.mutable
 import java.util.concurrent.atomic.AtomicInteger
 
 object FutureUtil {
+  private def sequence(fs: Future[Any]*)(implicit executor: ExecutionContext): Future[Seq[Any]] = {
+    val promise = Promise[Seq[Any]]()
+    val remaining = new AtomicInteger(fs.size)
+    val res = Array.ofDim[Any](fs.size) 
+    
+    def maybeComplete() = {
+      if(remaining.decrementAndGet() == 0) {
+        promise.success(res)
+      }
+    }
+    
+    for((f, i) <- fs.zipWithIndex) {
+      f.onComplete { 
+        case Success(v) =>
+          res(i) = v
+          maybeComplete()
+        case Failure(e) =>
+          promise.tryFailure(e)
+      }
+    }
+    promise.future
+  }
+
+  
   def tuple[T1, T2](f1: Future[T1], f2: Future[T2])(implicit executor: ExecutionContext): Future[(T1, T2)] = {
     val promise = Promise[(T1, T2)]()
     val remaining = new AtomicInteger(2)
@@ -77,7 +102,10 @@ object FutureUtil {
     }
     promise.future
   }
+  
   def tuple[T1, T2, T3, T4](f1: Future[T1], f2: Future[T2], f3: Future[T3], f4: Future[T4])(implicit executor: ExecutionContext): Future[(T1, T2, T3, T4)] = {
-    ???
+    sequence(f1, f2, f3, f4).map { a =>
+      (a(0).asInstanceOf[T1], a(1).asInstanceOf[T2], a(2).asInstanceOf[T3], a(3).asInstanceOf[T4]) 
+    }
   }
 }

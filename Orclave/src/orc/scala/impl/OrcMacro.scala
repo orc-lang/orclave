@@ -5,6 +5,8 @@ import orc.scala.Orc
 import scala.concurrent.Future
 import scala.annotation.compileTimeOnly
 import orc.util.ListExtensions._
+import scala.collection.mutable
+
 import scala.language.experimental.macros
 
 object OrcMacroInternal {
@@ -28,7 +30,7 @@ object OrcMacroInternal {
  * - T: Remember that trees have types that can be different from the symbol to which they refer.
  */
 
-class OrcMacro(val c: Context) {
+class OrcMacro(val c: Context) extends OwnerSplicer {
   import c._
   import c.universe._
   //import compat._
@@ -61,6 +63,8 @@ class OrcMacro(val c: Context) {
     val Orc_mapSym = OrcSym.info.member(TermName("map"))
     val variable = q"_root_.orc.scala.Orc.variable"
     val scalaExpr = q"_root_.orc.scala.Orc.scalaExpr"
+    val scalaclave = q"_root_.orc.scala.Orc.scalaclave"
+    val scalaclaveSym = OrcObjSym.info.member(TermName("scalaclave"))
     val FutureUtil = reify(orc.scala.impl.FutureUtil).tree
     val orcToBlockingIterable = q"_root_.orc.scala.Orc.orcToBlockingIterable"
   }
@@ -122,6 +126,33 @@ class OrcMacro(val c: Context) {
   sealed trait OrclaveGenerated
   object OrclaveGenerated extends OrclaveGenerated
 
+  implicit class SymbolAdds(val s: c.Symbol) {
+    def kind: ValueKind = {
+      val attachedKind = s.attachments.get[ValueKind]
+      val typeKind = Option(s.info).map(_.kind)
+      // If we have the symbol kind use that, otherwise use attached/type kind if they agree otherwise use whatever we have.
+      (attachedKind, typeKind) match {
+        /*case (Some(k1), Some(k2)) if k1 == k2 =>
+          k1
+        case (Some(k1), Some(k2)) =>
+          throw new IllegalStateException(s"Kinds ($k1, $k2) disagree on $s.")
+          */
+        case (Some(k1), _) =>
+          // Allow disagreement and give attached priority.
+          k1
+        case (_, Some(k1)) =>
+          k1
+        case (None, None) =>
+          throw new IllegalStateException(s"Kind unknown (no type or kind set): $s")
+      }
+    }
+    
+    def setKind(k: ValueKind): s.type = {
+      s.updateAttachment(k)
+      s
+    }
+  }
+  
   implicit class TreeAdds(val t: c.Tree) {
     def setGenerated(): t.type = {
       t.updateAttachment(OrclaveGenerated)
@@ -135,28 +166,38 @@ class OrcMacro(val c: Context) {
       val attachedKind = t.attachments.get[ValueKind]
       val typeKind = Option(t.tpe).map(_.kind)
       val symbolKind = t match {
-        // TODO: This should really only rule out getting the symbol kind from methods without argument lists.
-        case Ident(n) if t.symbol != null && t.symbol != NoSymbol && !t.symbol.isMethod =>
-          Some(t.symbol.info.kind)
+        // Only accept override from attached kind on symbols.
+        case _ if t.symbol != null && t.symbol != NoSymbol =>
+          t.symbol.attachments.get[ValueKind]
+        case _ =>
+          None
+      }
+      val symbolTypeKind = t match {
+        // Only accept override from attached kind on symbols.
+        case _ if t.symbol != null && t.symbol != NoSymbol =>
+          Some(t.symbol.kind)
         case _ =>
           None
       }
       // If we have the symbol kind use that, otherwise use attached/type kind if they agree otherwise use whatever we have.
-      (attachedKind, typeKind, symbolKind) match {
-        case (k1, k2, Some(k3)) =>
+      (attachedKind, typeKind, symbolKind, symbolTypeKind) match {
+        case (k1, k2, Some(k3), _) =>
           if(k3 != FutureValue && k2 != Some(k3) && k1 != Some(k3))
             info(t.pos, s"ICE: Kind should only be overriden to future (used by graft). ($k1, $k2, $k3)", true)
           k3
-        case (Some(k1), Some(k2), _) if k1 == k2 =>
+        case (Some(k1), Some(k2), _, _) if k1 == k2 =>
           k1
-        case (Some(k1), Some(k2), _) =>
+        case (Some(k1), Some(k2), _, _) =>
           throw new IllegalStateException(s"Kinds ($k1, $k2) disagree on $t.")
-        case (Some(k1), _, _) =>
+        case (Some(k1), _, _, _) =>
           k1
-        case (_, Some(k1), _) =>
+        case (_, Some(k1), _, _) =>
           k1
-        case (None, None, None) =>
-          throw new IllegalStateException(s"Kind unknown (no type or kind set): $t")
+        // If it's not set anywhere else then get the kind for the type of the symbol
+        case (_, _, _, Some(k1)) =>
+          k1
+        case (None, None, None, None) =>
+          throw new IllegalStateException(s"Kind unknown (no type or kind set): $t (tpe=${t.tpe}, symbol=${t.symbol})")
       }
     }
     
@@ -207,6 +248,43 @@ class OrcMacro(val c: Context) {
 
     def kind: ValueKind = ValueKind(t)
   }
+  
+  class FindFreeVariables(predicate: Ident => Boolean) extends Traverser {
+    private val resultBuilder = Set.newBuilder[Symbol]
+    private val localSymbols = mutable.Set[Symbol]()
+    
+    def isVariableSymbol(n: Name, s: Symbol) = {
+      s.isTerm &&
+      !s.isMethod &&
+      !s.isModule &&
+      !s.isClass &&
+      !s.isPackage &&
+      n != termNames.WILDCARD
+    }
+    
+    override def traverse(tree: Tree) = tree match {
+      case i @ Ident(n) if isVariableSymbol(n, i.symbol) && !localSymbols.contains(i.symbol) && predicate(i) =>
+        resultBuilder += i.symbol
+      case ValDef(_, _, _, body) =>
+        assert(tree.symbol != null && tree.symbol != NoSymbol)
+        localSymbols += tree.symbol
+        atOwner(tree.symbol) { traverse(body) }
+      case Bind(_, body) =>
+        assert(tree.symbol != null && tree.symbol != NoSymbol)
+        localSymbols += tree.symbol
+        atOwner(tree.symbol) { traverse(body) }
+      case _ =>
+        super.traverse(tree)
+    }
+    
+    def result = resultBuilder.result()
+  }
+  
+  def findFreeVariables(tree: Tree, predicate: Ident => Boolean) = {
+    val trav = new FindFreeVariables(predicate)
+    trav.traverse(tree)
+    trav.result
+  }
 
   /** Transform a Scala tree representing Orc code into an implementation of that Orc.
     *
@@ -222,8 +300,9 @@ class OrcMacro(val c: Context) {
      * + Applications
      * + Graft
      * + Congruence on calls to Orc
-     * - scalaclaves
+     * + scalaclaves
      * - def
+     * - Assignment statements as unit returning sitecalls
      */
     // TODO: Finish todos above
     
@@ -470,6 +549,13 @@ class OrcMacro(val c: Context) {
         orcInScalaContextSym
         )
     }
+    
+    def stripTypeFixers(t: Tree): Tree = t match {
+      case q"${ f @ q"$prefix.$n" }[$_]($e)" if typeFixerSymbols contains f.symbol =>
+        stripTypeFixers(e)
+      case _ =>
+        t
+    }
 
     /** Tranform `tree` to an Orc[T] type.
      */
@@ -507,7 +593,10 @@ class OrcMacro(val c: Context) {
         }
       }
 
-      //println(s">> [${tree.kind} => {${allowedKinds.mkString(", ")}} (from ${extAllowedKinds.mkString(", ")}})] $tree", currentPos)
+      val traceCalls = false
+      if (traceCalls)
+        println(s">> [${tree.kind} => {${allowedKinds.mkString(", ")}} (from ${extAllowedKinds.mkString(", ")}})] $tree", currentPos)
+      
       val result = withIndent(currentPos) {
         val result = tree match {
           // Remove type fixers
@@ -554,6 +643,62 @@ class OrcMacro(val c: Context) {
                 throw new IllegalArgumentException(s"OrcTransform cannot transform Graft[_] values\n${showRaw(tree)}")
             }
           
+          // Scalaclave rule
+          case q"${callee @ q"$prefix.$f"}[..$targs]($e)" if callee.symbol == Constants.scalaclaveSym =>
+            //val e = stripTypeFixers(eRaw)
+            // Find all free variables in e which are bound to futures
+            val freeFutures = findFreeVariables(e, i => i.kind == FutureValue).toList
+            //println(s"Free future $freeFutures")
+            // Force all those variables before the scalaclave executes
+            buildApply(List(freeFutures.map(Ident)), List(freeFutures.map(_.info.withoutKind)), e.tpe, OrcValue, e.pos) { argss =>
+              val List(args) = argss
+              val symBinders = for((futS, arg) <- (freeFutures zip args)) yield {
+                val name = futS.name.toTermName
+                val tpe = futS.info.withoutKind
+                val sym = currentOwner.newTermSymbol(name, futS.pos, Flag.SYNTHETIC)
+                sym.setInfo(tpe)
+                val r = ValDef(Modifiers(Flag.SYNTHETIC), name, TypeTree(tpe), arg)
+                r.setSymbol(sym)
+                r
+              }
+              val symMap = (freeFutures zip symBinders.map(_.symbol)).toMap
+              //println(s"Built: $symMap and:\n${symBinders.mkString("\n")}")
+              // Remove calls to futureInScalaContext and orcInScalaContext around replaced variables from e
+              // And replace all those variables in e with the result of forcing
+              val liftSymbol = Set(orcInScalaContextSym, futureInScalaContextSym)
+              object LiftingApply {
+                def unapply(t: Tree): Option[(ValueKind, Tree)] = {
+                  t match {
+                    case q"$e: $tpe" =>
+                      Some((tpe.kind, e))
+                    case q"${ f @ q"$prefix.$n" }[$_]($e)" if liftSymbol contains f.symbol =>
+                      Some((f.symbol.info.finalResultType.kind, e))
+                    case _ => Some((t.kind, t))
+                  }
+                }
+              }
+              val e1 = typingTransform(e, currentOwner) { (reptree, repapi) =>
+                val t = reptree match {
+                  case LiftingApply(k, i @ Ident(name)) if symMap contains i.symbol =>
+                    // TODO: This can generate runtime type errors.
+                    // How do I make sure the type is correct?
+                    //println(s"$i: $k ${i.kind}")
+                    if (k != ScalaValue) {
+                      // TODO: This should be a warning not an error. However, it's unclear how to correct the reference in this case.
+                      error(i.pos, s"[Orclave] Reference to ${name.decodedName} must have expected type ${i.tpe.withoutKind}. Adding an explicit type annotation may help.")
+                      i
+                    } else {
+                      repapi.typecheck(Ident(symMap(i.symbol)).setPos(i.pos))
+                    }
+                  case _ =>
+                    repapi.default(reptree)
+                }
+                //println(s"Replacing $reptree with $t in scalaclave.")
+                t
+              }
+              ownerSplice(Block(symBinders, e1), owner=currentOwner)
+            }
+            
           // Special congruence rule for primitives with lambda arguments
           case q"${callee @ q"$prefix.$f"}[..$targs](${lambda @ q"($x) => $e"})" if isOrcPrimitive(callee) =>
             //println(s"Call ${callee.symbol} $lambda")
@@ -578,7 +723,7 @@ class OrcMacro(val c: Context) {
               else
                 Set(f.kind)
             }
-            //println(s"Call ${f.symbol} $prefix $n $argss (${isOrcPrimitive(f)})\n${f.symbol.owner}")
+            //println(s"Call ${f.symbol} $prefix $n $argss (${isOrcPrimitive(f)})  ${f.symbol.owner}")
             val f1 = q"${recur(prefix, allowedPrefixKinds)}.$n"
             handleApply(f, f1, targs, argss, List(List(prefix)), List(List(prefix.tpe))) {
               argss =>
@@ -608,7 +753,7 @@ class OrcMacro(val c: Context) {
             val newStats = grafts.flatMap { p =>
               val (origS, name, pat) = p
               // Mark the symbol we are replacing as having a future type
-              origS.symbol.setInfo(origS.symbol.info.withKind(FutureValue))
+              origS.symbol.setKind(FutureValue)
               Seq(pat.valDef, ValDef(Modifiers(Flag.SYNTHETIC), name, TypeTree(), pat.futureExpr).setGenerated())
             }
             // Recur
@@ -633,7 +778,8 @@ class OrcMacro(val c: Context) {
         result
       }
       result.setPos(currentPos)
-      //println(s"<< [${tree.kind} => ${result.kindOpt.getOrElse("?")}] ===> $result", currentPos)
+      if (traceCalls)
+        println(s"<< [${tree.kind} => ${result.kindOpt.getOrElse("?")}] ===> $result", currentPos)
       result
     }
   }

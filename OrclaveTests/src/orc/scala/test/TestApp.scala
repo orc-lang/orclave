@@ -15,24 +15,35 @@ object TestApp {
   def delayedValue[T](n: Long, v: T): T = { Thread.sleep(n); v }
   def delayedValueO[T](n: Long, v: T): Orc[T] = scalaExpr { Thread.sleep(n); v }
 
+  def takeFuture[T](f: Future[T]): Unit = println(f)
+
   def methadd1(n: Int) = n + 1
   def add2(n: Int)(m: Int) = n + m
 
   def main(args: Array[String]): Unit = {
-    def x = scalaclave { 1 }
+    //val f = Future.successful(1)
+    /*def x = scalaclave { 1 }
     def add1(n: Int) = n + 1
-    val f = Future.successful(1)
     val o1 = orcExpr(1)
     val o2 = orcExpr(o1)
     val o3 = orcExpr(f)
+    */
+    var x = 0
     val r = orclave {
-      val x = println("a")
-      //println(x)
-      val y = println("b")
-      val z = 42
-      //def f() = 3
-      delayedValueO(2, "test").startsWith("t") andthen "test"
+      trim {
+        {
+          (for (_ <- badSleep(200)) yield {
+            scalaclave { x = 1 }
+          })
+        } |||
+          {
+            (for (_ <- badSleep(100)) yield {
+              1
+            })
+          }
+      }
     }
+    
     for (p <- r) {
       println(s"Pub: $p")
     }
