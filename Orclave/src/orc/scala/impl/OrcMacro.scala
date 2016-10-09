@@ -32,7 +32,7 @@ object OrcMacroInternal {
 
 class OrcMacro(val c: Context) extends OwnerSplicer {
   import c._
-  import c.universe._
+  import c.universe.{typeOf => _, _}
   //import compat._
   import c.internal._
   import c.internal.decorators._
@@ -301,8 +301,9 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
      * + Graft
      * + Congruence on calls to Orc
      * + scalaclaves
+     * + Assignment statements as unit returning sitecalls
      * - def
-     * - Assignment statements as unit returning sitecalls
+     * - Otherwise-like combinator for exception handling 
      */
     // TODO: Finish todos above
     
@@ -730,6 +731,19 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
                 val List(p) :: realArgss = argss
                 q"$p.$n[..$targs](...$realArgss)"
             }
+          case q"$x = $v" =>
+            // Strip the symbol from any x that is an ident.
+            val newX = x match {
+              case Ident(x) => Ident(x)
+              case o =>
+                error(o.pos, s"Assignment to $o not supported in Orclave.")
+                o
+            }
+            buildApply(List(List(v)), List(List(v.tpe)), typeOf[Unit], OrcValue, currentPos) {
+              argss =>
+                val List(List(v1)) = argss
+                q"$newX = $v"
+            }
 
           // Rules for handling val in blocks
           case Block(stats, expr) =>
@@ -739,26 +753,34 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
               s match {
                 case q"val $x: $t = $e" =>
                   ()
+                case q"var $x: $t = $e" =>
+                  ()
                 case _ =>
                   // TODO: Add advice for running statement after.
-                  error(s.pos, s"Statements (other than vals) are not supported in Orclaves. Use val _ = [stat] to run your statement in parallel or [stat] andthen ... to run in sequence.")
+                  error(s.pos, s"Statements other than vals and vars are not supported in Orclaves. Use val _ = [stat] to run your statement in parallel or [stat] andthen ... to run in sequence.")
               }
             }
-
-            // Build graft pattern for each
-            val grafts = for (s @ q"val $x: $t = $e" <- stats) yield {
-              (s, x, GraftPattern(recur(e, Set(OrcValue)), freshName(TermName(x + "_graft")), e.tpe))
+            
+            if (!hasErrors) {
+              // Build graft pattern for each
+              val grafts = mutable.Buffer[GraftPattern]()
+              // Build a pair of vals for each
+              val newStats = stats.flatMap(s => s match {
+                case q"val $x: $t = $e" =>
+                  val pat = GraftPattern(recur(e, Set(OrcValue)), freshName(TermName(x + "_graft")), e.tpe)
+                  grafts += pat
+                  s.symbol.setKind(FutureValue)
+                  Seq(pat.valDef, ValDef(Modifiers(Flag.SYNTHETIC), x, TypeTree(), pat.futureExpr).setGenerated())
+                case q"var $x: $t = $e" =>
+                  Seq(q"var $x: $t = $e")
+              })
+              // Recur
+              val newExpr = Construct.parallel(recur(expr, Set(OrcValue)) +: grafts.map(_.body))
+              q"{ ..$newStats; $newExpr }".setKind(OrcValue)
+            } else {
+              Block(stats.map(recur(_, Set(OrcValue))), recur(expr, Set(OrcValue)))
             }
-            // Build a pair of vals for each
-            val newStats = grafts.flatMap { p =>
-              val (origS, name, pat) = p
-              // Mark the symbol we are replacing as having a future type
-              origS.symbol.setKind(FutureValue)
-              Seq(pat.valDef, ValDef(Modifiers(Flag.SYNTHETIC), name, TypeTree(), pat.futureExpr).setGenerated())
-            }
-            // Recur
-            val newExpr = Construct.parallel(recur(expr, Set(OrcValue)) +: grafts.map(_._3.body))
-            q"{ ..$newStats; $newExpr }".setKind(OrcValue)
+              
             
           // Things I don't care about and can pass through.
           case t @ TypeTree() =>
@@ -768,7 +790,7 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
             t
         }
         try {
-          if(!(allowedKinds contains result.kind)) {
+          if(!hasErrors && !(allowedKinds contains result.kind)) {
             println(s"Kind not in allowed set: ${result.kind} not in $allowedKinds")
           }
         } catch {

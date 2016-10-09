@@ -384,4 +384,34 @@ class OrclaveRuntimeTests extends FlatSpec with Matchers {
       x should be(0)
     }
   }
+
+  it should "support assignment" in {
+    failAfter(10 seconds) {
+      var x = 0
+      val r = orclave {
+        for (_ <- badSleep(200)) yield {
+          x = 1
+        }
+      }
+      x should be(0)
+      r.toList should be(List(()))
+      x should be(1)
+    }
+  }
+
+  it should "support vars" in {
+    failAfter(10 seconds) {
+      val r = orclave {
+        var x = 0
+        val _ = for (_ <- badSleep(200)) yield {
+          x = 1
+        }
+        x |||
+          (for (_ <- badSleep(300)) yield {
+            x
+          })
+      }
+      r.toList should be(List(0, 1))
+    }
+  }
 }
