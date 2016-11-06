@@ -55,11 +55,13 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
     import TypeTrees._
     val OrcMacroInternal = q"_root_.orc.scala.impl.OrcMacroInternal"
     val orcInScalaContext = q"_root_.orc.scala.Orc.orcInScalaContext"
-    val orcInScalaContextSym = OrcLowPriorityImplicitsSym.info.member(TermName("orcInScalaContext"))
-    val futureInScalaContextSym = OrcLowPriorityImplicitsSym.info.member(TermName("futureInScalaContext"))
-    val futureInOrcContextSym = OrcLowPriorityImplicitsSym.info.member(TermName("futureInOrcContext"))
+    val orcInScalaContextSym = OrcObjSym.info.member(TermName("orcInScalaContext"))
+    val futureInScalaContextSym = OrcObjSym.info.member(TermName("futureInScalaContext"))
+    val futureInOrcContextSym = OrcObjSym.info.member(TermName("futureInOrcContext"))
     val scalaInOrcContext = q"_root_.orc.scala.Orc.scalaInOrcContext"
-    val scalaInOrcContextSym = OrcLowPriorityImplicitsSym.info.member(TermName("scalaInOrcContext"))
+    val scalaInOrcContextSym = OrcObjSym.info.member(TermName("scalaInOrcContext"))
+    val scalaInFutureContext = q"_root_.orc.scala.Orc.scalaInFutureContext"
+    val scalaInFutureContextSym = OrcLowPriorityImplicitsSym.info.member(TermName("scalaInFutureContext"))
     val Orc_mapSym = OrcSym.info.member(TermName("map"))
     val variable = q"_root_.orc.scala.Orc.variable"
     val scalaExpr = q"_root_.orc.scala.Orc.scalaExpr"
@@ -125,6 +127,8 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
 
   sealed trait OrclaveGenerated
   object OrclaveGenerated extends OrclaveGenerated
+  sealed trait OrclaveRetyped
+  object OrclaveRetyped extends OrclaveRetyped
 
   implicit class SymbolAdds(val s: c.Symbol) {
     def kind: ValueKind = {
@@ -150,6 +154,14 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
     def setKind(k: ValueKind): s.type = {
       s.updateAttachment(k)
       s
+    }
+    
+    def setRetyped(): s.type = {
+      s.updateAttachment(OrclaveRetyped)
+      s
+    }
+    def isRetyped: Boolean = {
+      s.attachments.get[OrclaveRetyped].isDefined
     }
   }
   
@@ -379,17 +391,6 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
       * @param coreFunc  Given a list of trees of the appropriate kinds build the call. The provided trees will not be typed.
       */
     def buildApply(argss: List[List[Tree]], argTypess: List[List[Type]], returnType: Type, expectedKind: ValueKind, pos: Position)(coreFunc: List[List[Tree]] => Tree): Tree = {
-      //val formalKindss = argTypess.innerMap(_.kind)
-      //val returnKind = returnType.kind
-      
-      for(argTypes <- argTypess; argType <- argTypes) argType.kind match {
-        case OrcValue =>
-          error(pos, "Orc[_] argument types are not allowed on function called from within an Orclave.")
-        case GraftValue =>
-          error(pos, "Graft[_] argument types are not allowed on function called from within an Orclave.")
-        case _ => ()
-      }
-
       def refName(a: Tree) = {
         if (a.symbol != null && a.symbol != NoSymbol)
           a.symbol.name.encodedName.toString()
@@ -397,50 +398,69 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
           "expr"
       }
       
-      
       sealed trait Argument {
         val name: String
         def freshRefName(r: String) = freshName(TermName(s"${name}_$r"))
-        def argumentExpr: Tree
+        def argumentExpr(kind: ValueKind): Tree
       }
       trait ForcedArg extends Argument {
         def futureExpr: Tree
         
         val forcedName: TermName = freshRefName("forced")
-        def argumentExpr = q"$forcedName" 
+        def argumentExpr(kind: ValueKind) = {
+          kind match {
+            case ScalaValue => q"$forcedName" 
+            case FutureValue => q"$futureExpr"
+            case _ =>
+              error(futureExpr.pos, "Only Scala or Future[_] argument tupes are supported with future argument values.")
+              q"$forcedName"
+          }
+        }
       }
       case class GraftArg(graftBody: Tree, name: String, tpe: Type) extends GraftPatternBase(graftBody, tpe) with Argument with ForcedArg {
         val graftName = freshRefName("graft")
-        override def toString(): String = s"GraftArg(..., $name, $tpe)"
+        override def toString(): String = s"GraftArg($graftBody, $name, $tpe)"
       }
       case class ScalaArg(scalaExpr: Tree, name: String) extends Argument {
         assume(scalaExpr.kind == ScalaValue)
-        def argumentExpr = scalaExpr
+        def argumentExpr(kind: ValueKind) = {
+          assert(kind == ScalaValue)
+          scalaExpr
+        }
       }
       case class FutureArg(futureExpr: Tree, name: String) extends Argument with ForcedArg {
         assume(futureExpr.kind == FutureValue)
       }
       
-      val arguments = argss.innerMap { arg =>
+      val arguments = (argss innerZip argTypess).innerMap { case (arg, tpe) =>
         val n = refName(arg)
         val e = recur(arg, Set(OrcValue, FutureValue, ScalaValue))
-        e.kind match {
-          case OrcValue =>
-            GraftArg(e, n, null)
-          case ScalaValue =>
+        (e.kind, tpe.kind) match {
+          case (OrcValue, _) | (_, FutureValue) =>
+            GraftArg(buildKindConvertion(e.kind, OrcValue)(e), n, null)
+          case (ScalaValue, ScalaValue) =>
             ScalaArg(e, n)
-          case FutureValue =>
+          case (FutureValue, _) =>
             FutureArg(e, n)
-          case GraftValue =>
-            error(arg.pos, "Graft[_] argument are not allowed within an Orclave.")
+          case (GraftValue, _) =>
+            error(arg.pos, "Graft[_] argument values are not allowed within an Orclave.")
             FutureArg(q"$e.future", n)
+          case (_, GraftValue) =>
+            error(arg.pos, "Graft[_] argument types cannot be called from within an Orclave.")
+            ScalaArg(e, n)
+          case (_, OrcValue) =>
+            error(arg.pos, "Orc[_] argument types cannot be called from within an Orclave.")
+            ScalaArg(e, n)
         }
       }
       
-      //println(s"apply: ${arguments.mkString(",")}", pos)
-
       lazy val core = {
-        val c = coreFunc(arguments.innerMap(_.argumentExpr))
+        val c = coreFunc((arguments innerZip argTypess).innerMap { p =>
+          val (x, formalTpe) = p
+          val arg = x.argumentExpr(formalTpe.kind)
+          arg
+        })
+        //println(s"Core: ${returnType} ${returnType.kind} $expectedKind $c")
         buildKindConvertion(returnType.kind, expectedKind)(c)
       }
       
@@ -476,7 +496,12 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
         }
       }
       
-      lazy val forceCore = force(arguments.flatten.collect { case f: ForcedArg => f }, core)
+      // println(s"Arg info: ${argss innerZip arguments innerZip argTypess}")
+            
+      lazy val forcedValues = (arguments innerZip argTypess).flatten.collect { 
+        case (f: ForcedArg, formalTpe) if formalTpe.kind == ScalaValue => f
+      }
+      lazy val forceCore = force(forcedValues, core)
       
       lazy val graftArgs = arguments.flatten.collect { case g: GraftArg => g }
       
@@ -491,6 +516,37 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
       """
       r.setKind(expectedKind)
       r
+    }
+    
+    def buildDef(tree: DefDef): Seq[Tree] = {
+      // TODO: Implement support for methods with type parameters
+      // TODO: Implement support for methods without parameter lists and with multiple parameter lists.
+      withIndent(tree.pos) {
+        val q"def $f(...$argss): $t = $e" = tree
+        val newT: Tree = TypeTree(t.tpe.withKind(OrcValue))
+        val newArgss: List[List[Tree]] = argss.innerMap { x => 
+          val ValDef(mods, name, declTpe, expr) = x
+          x.symbol.setKind(FutureValue)
+          ValDef(mods, name, TypeTree(declTpe.tpe.withKind(FutureValue)), expr)
+        }
+        def updateType(tpe: Type): Type = {
+          tpe match {
+            case MethodType(args, ret) =>
+              args.foreach { s => 
+                s.setKind(FutureValue)
+                s.setInfo(s.info.withKind(FutureValue))
+              }
+              methodType(args, updateType(ret))
+            case t =>
+              t.withKind(OrcValue)
+          }
+        }
+        tree.symbol.setInfo(updateType(tree.symbol.info))
+        tree.symbol.setRetyped()
+        // The recursion must be after updating types.
+        val newE: Tree = recur(e, Set(OrcValue))
+        Seq(q"def $f(...$newArgss): $newT = $newE")
+      }
     }
 
     val excludedClasses = {
@@ -546,6 +602,7 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
       Set(
         futureInOrcContextSym,
         scalaInOrcContextSym,
+        scalaInFutureContextSym,
         futureInScalaContextSym,
         orcInScalaContextSym
         )
@@ -584,8 +641,10 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
         if (isOrcPrimitive(forig)) {
           q"$f[..$targs](...${argss.innerMap(recur(_, Set(OrcValue)))})".setKind(OrcValue)
         } else if (allowedKinds contains OrcValue) {
-          buildApply(prefixArgs ::: argss, prefixArgTypes ::: forig.tpe.paramLists.innerMap(_.info), forig.tpe.finalResultType, OrcValue, currentPos)(coreFunc)
+          val tpe = if(forig.symbol != null && forig.symbol.isRetyped) forig.symbol.info else forig.tpe
+          buildApply(prefixArgs ::: argss, prefixArgTypes ::: tpe.paramLists.innerMap(_.info), tpe.finalResultType, OrcValue, currentPos)(coreFunc)
         } else if (allowedKinds contains tree.kind) {
+          // TODO: This is referencing tree the passed in tree in the outer function. Is this correct?
           // Handle references that are not allowed to be Orc. Just hope all the subexpressions can be converted.
           q"$f[..$targs](...${argss.innerMap(a => recur(a, Set(a.kind)))})".setKind(tree.kind)
         } else {
@@ -754,9 +813,11 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
                 case q"val $x: $t = $e" =>
                   ()
                 case q"var $x: $t = $e" =>
+                  warning(s.pos, s"Semantics of var in Orclave may change.")
+                  ()
+                case q"def $f(...$argss): $t = $e" =>
                   ()
                 case _ =>
-                  // TODO: Add advice for running statement after.
                   error(s.pos, s"Statements other than vals and vars are not supported in Orclaves. Use val _ = [stat] to run your statement in parallel or [stat] andthen ... to run in sequence.")
               }
             }
@@ -773,6 +834,8 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
                   Seq(pat.valDef, ValDef(Modifiers(Flag.SYNTHETIC), x, TypeTree(), pat.futureExpr).setGenerated())
                 case q"var $x: $t = $e" =>
                   Seq(q"var $x: $t = $e")
+                case defe @ q"def $f(...$argss): $t = $e" =>
+                  buildDef(defe.asInstanceOf[DefDef])
               })
               // Recur
               val newExpr = Construct.parallel(recur(expr, Set(OrcValue)) +: grafts.map(_.body))

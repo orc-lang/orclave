@@ -14,6 +14,7 @@ class OrclaveRuntimeTests extends FlatSpec with Matchers {
   import Orc._
 
   def badSleep(n: Long): Orc[Unit] = scalaclave(Thread.sleep(n))
+  def ift(b: Boolean): Orc[Unit] = if(b) scalaclave(()) else stop
   def delayedValue[T](n: Long, v: T): T = { Thread.sleep(n); v }
 
   "Orclave (macro code) runtime" should "execute constant expressions" in {
@@ -412,6 +413,44 @@ class OrclaveRuntimeTests extends FlatSpec with Matchers {
           })
       }
       r.toList should be(List(0, 1))
+    }
+  }
+  
+  it should "support defs" in {
+    failAfter(10 seconds) {
+      val r = orclave {
+        def f(t: Int, x: Int): String = for (_ <- badSleep(t)) yield {
+          x.toString
+        }
+        f(100, 1) ||| f(0, 2)
+      }
+      r.toList should be(List("2", "1"))
+    }
+  }
+  
+  it should "support recursive defs" in {
+    failAfter(10 seconds) {
+      val r = orclave {
+        def f(t: Int, x: Int): String = for (_ <- badSleep(t); _ <- ift(x < 3)) yield {
+          x.toString() ||| f(t, x+1)
+        }
+        f(100, 1)
+      }
+      r.toList should be(List("1", "2"))
+    }
+  }
+  
+  it should "trim works on recursive defs" in {
+    failAfter(10 seconds) {
+      val r = orclave {
+        def f(t: Int, x: Int): String = for (_ <- badSleep(t)) yield {
+          x.toString() ||| f(t, x+1)
+        }
+        trim {
+          f(100, 1)
+        }
+      }
+      r.toList should be(List("1"))
     }
   }
 }

@@ -211,9 +211,8 @@ object Orc extends OrcLowPriorityImplicits {
     * The returned Orc expression publishes v and halts.
     */
   def scalaExpr[T](v: => T): Orc[T] = new impl.ScalaExpr(() => v)
-}
 
-trait OrcLowPriorityImplicits {
+
   // Integration of Orc with normal Scala types
   @compileTimeOnly("[Orclave] Orc expression can only be used as their underlying type inside an orclave. An Orc expression was used as T.")
   implicit def orcInScalaContext[T](o: Orc[T]): T = {
@@ -223,9 +222,9 @@ trait OrcLowPriorityImplicits {
   @compileTimeOnly("[Orclave] Orc operators can only be used on arbitrary values inside an orclave.")
   implicit def scalaInOrcContext[T](o: T): Orc[T] = {
     throw new AssertionError("scalaInOrcContext should never appear in a compiled program. There is a bug in the macro.")
-  }
+  }  
 
-  // TODO: Concider lifting these conversions to (especially future->scala) to a separate import. So as to avoid confusion who are not bringing along their own futures.
+  // TODO: Consider lifting these conversions to (especially future->scala) to a separate import. So as to avoid confusion who are not bringing along their own futures.
   // Integration of Futures with Orc and Scala types
   @compileTimeOnly("[Orclave] Orc Future[T] conversions can only be used inside an orclave. This is probably caused by importing Orc._ implicits outside an Orclave.")
   implicit def futureInScalaContext[T](o: Future[T]): T = {
@@ -235,6 +234,14 @@ trait OrcLowPriorityImplicits {
   @compileTimeOnly("[Orclave] Orc Future[T] conversions can only be used inside an orclave. This is probably caused by importing Orc._ implicits outside an Orclave.")
   implicit def futureInOrcContext[T](o: Future[T]): Orc[T] = {
     throw new AssertionError("futureInOrcContext should never appear in a compiled program. There is a bug in the macro.")
+  }
+}
+
+trait OrcLowPriorityImplicits {
+  // Integration of Futures with normal Scala types
+  @compileTimeOnly("[Orclave] Orc operators can only be used on arbitrary values inside an orclave.")
+  implicit def scalaInFutureContext[T](o: T): Future[T] = {
+    throw new AssertionError("scalaInFutureContext should never appear in a compiled program. There is a bug in the macro.")
   }
 
   sealed trait StripOrcConstructor[T, R]
