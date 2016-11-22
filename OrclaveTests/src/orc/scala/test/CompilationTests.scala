@@ -63,4 +63,12 @@ object CompilationTests {
       println("Done")
     }
   }
+  
+  def o6 = orclave {
+    def x() = println("a")
+    val z = 42
+    def f(x: Int) = 3 + x
+    x() andthen f(z)
+  }
+  
 }

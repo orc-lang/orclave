@@ -314,10 +314,11 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
      * + Congruence on calls to Orc
      * + scalaclaves
      * + Assignment statements as unit returning sitecalls
-     * - def
-     * - Otherwise-like combinator for exception handling 
+     * + def
+     * - if statements
+     * - pattern matching
+     * - Orc objects
      */
-    // TODO: Finish todos above
     
     object Construct {
       def parallel(ts: Iterable[Tree]) = {
