@@ -315,7 +315,7 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
      * + scalaclaves
      * + Assignment statements as unit returning sitecalls
      * + def
-     * - if statements
+     * + if statements
      * - pattern matching
      * - Orc objects
      */
@@ -845,12 +845,19 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
               Block(stats.map(recur(_, Set(OrcValue))), recur(expr, Set(OrcValue)))
             }
               
+          // Rules for handling if
+          case ife @ q"if($cond) $thenp else $elsep" =>
+            buildApply(List(List(cond)), List(List(cond.tpe)), ife.tpe.withKind(OrcValue), OrcValue, currentPos) {
+              argss =>
+                val List(List(cond1)) = argss
+                q"if($cond1) ${recur(thenp, Set(OrcValue))} else ${recur(elsep, Set(OrcValue))}"
+            }
             
           // Things I don't care about and can pass through.
           case t @ TypeTree() =>
             t
           case t =>
-            error(currentPos, s"Unsupported expression in Orclave: ${showRaw(t)}")
+            error(currentPos, s"Unsupported expression in Orclave: ${t}")
             t
         }
         try {

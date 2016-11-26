@@ -71,4 +71,7 @@ object CompilationTests {
     x() andthen f(z)
   }
   
+  def o7 = orclave {
+    if (true) 3 else stop
+  }
 }

@@ -453,4 +453,53 @@ class OrclaveRuntimeTests extends FlatSpec with Matchers {
       r.toList should be(List("1"))
     }
   }
+  
+  it should "support if statements" in {
+    failAfter(10 seconds) {
+      val b = true
+      val r = orclave {
+        if(b) 1 else 2
+      }
+      r.toList should be(List(1))
+    }
+    failAfter(10 seconds) {
+      val r = orclave {
+        val b = false
+        if(b) 1 else 2
+      }
+      r.toList should be(List(2))
+    }
+    failAfter(10 seconds) {
+      val r = orclave {
+        val b = true
+        if(b) 1 else stop
+      }
+      r.toList should be(List(1))
+    }
+    failAfter(10 seconds) {
+      val b = false
+      val r = orclave {
+        if(b) 1 else stop
+      }
+      r.toList should be(List())
+    }
+  }
+  
+  it should "support if statements in functions" in {
+    failAfter(10 seconds) {
+      val r = orclave {
+        def f(x: Int): Int = if(x > 0) 1 else 2
+        def g(x: Int): Int = if(x > 0) 3 else stop
+        f(1) |||
+        f(0) |||
+        g(1) |||
+        g(0)
+      }
+      val s = r.toList 
+      s.size should be(3)
+      s should contain(1)
+      s should contain(2)
+      s should contain(3)
+    }
+  }
 }

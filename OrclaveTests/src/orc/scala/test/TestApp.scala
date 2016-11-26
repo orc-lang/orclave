@@ -31,9 +31,9 @@ object TestApp {
     val o3 = orcExpr(f)
     */
     val r = orclave {
-      def f(t: Int, x: Int): String = for (_ <- ift(x < 15)) yield {
+      def f(t: Int, x: Int): String = if(x < 15) {
         (badSleep(t) andthen x.toString()) ||| f(t, x + 1)
-      }
+      } else { stop }
       f(100, 1)
     }
 
