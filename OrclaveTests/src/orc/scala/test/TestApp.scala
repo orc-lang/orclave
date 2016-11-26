@@ -20,21 +20,14 @@ object TestApp {
   def methadd1(n: Int) = n + 1
   def add2(n: Int)(m: Int) = n + m
 
-  def ift(b: Boolean): Orc[Unit] = if(b) scalaclave(()) else stop
-
   def main(args: Array[String]): Unit = {
-    //val f = Future.successful(1)
-    /*def x = scalaclave { 1 }
-    def add1(n: Int) = n + 1
-    val o1 = orcExpr(1)
-    val o2 = orcExpr(o1)
-    val o3 = orcExpr(f)
-    */
     val r = orclave {
-      def f(t: Int, x: Int): String = if(x < 15) {
-        (badSleep(t) andthen x.toString()) ||| f(t, x + 1)
-      } else { stop }
-      f(100, 1)
+      def f(t: Int, x: Int): String = for (_ <- badSleep(t)) yield {
+        x.toString() ||| (println(s"$x") andthen f(t, x + 1))
+      }
+      trim {
+        f(100, 1)
+      }
     }
 
     for (p <- r) {

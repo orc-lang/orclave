@@ -155,9 +155,13 @@ final class CounterNested(parent: Counter, haltContinuation: () => Unit)(implici
   /** Called when this whole context has halted.
     */
   override def onContextHalted(): Unit = {
-    ctx.schedule {
-      haltContinuation()
-    }
     super.onContextHalted()
+    try {
+      ctx.schedule {
+        haltContinuation()
+      }
+    } catch {
+      case _: KilledException => ()
+    }
   }
 }

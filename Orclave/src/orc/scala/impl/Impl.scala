@@ -68,6 +68,7 @@ class Otherwise[T](l: Orc[T], r: Orc[T]) extends Orc[T] {
         p(v)
       })(ctx.withCounter(newCounter))
     } finally {
+      // Matched against: initial count
       newCounter.halt()
     }
   }
@@ -97,11 +98,12 @@ class Graft[T](e: Orc[T]) extends orc.scala.Graft[T] with Terminatable {
         ctx.terminator.removeChild(Graft.this)
       }
       val newCounter = new CounterNested(ctx.counter, onHalt)
-      ctx.terminator.addChild(Graft.this)
       // TODO: Check
       try {
+        ctx.terminator.addChild(Graft.this)
         e.execute(promise.trySuccess)(ctx.withCounter(newCounter))
       } finally {
+        // Matched against: initial count
         newCounter.halt()
       }
     }
@@ -133,6 +135,7 @@ class ScalaExpr[T](v: () => T) extends Orc[T] {
 class Variable[T](fut: Future[T]) extends Orc[T] {
   def execute(p: PublicationCont[T])(implicit ctx: OrcExecutionContext): Unit = {
     // TODO: Check
+    // Matched against: halt in onComplete cases
     ctx.prepareSpawn()
     fut.onComplete {
       case Success(x) =>
@@ -140,6 +143,7 @@ class Variable[T](fut: Future[T]) extends Orc[T] {
           try {
             p(x)
           } finally {
+            // Matched against: prepareSpawn before onComplete call 
             ctx.halt()
           }
         } catch {
@@ -147,6 +151,7 @@ class Variable[T](fut: Future[T]) extends Orc[T] {
         }
       case Failure(e) =>
         try {
+          // Matched against: prepareSpawn before onComplete call 
           ctx.halt()
         } catch {
           case _: KilledException => ()
