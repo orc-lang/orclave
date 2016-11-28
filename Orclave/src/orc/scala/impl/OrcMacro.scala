@@ -324,10 +324,18 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
      * + Assignment statements as unit returning sitecalls
      * + def
      * + if statements
-     * - pattern matching
+     * - orc sites
+     * - orc defs outside an orclave
+     * - orc sites outside an orclave
+     * - optional arguments (with default values) on orc defs
      * - Orc objects
+     * - pattern matching
      * - calling Java static members
      */
+    
+    // TODO: This untypechecks things in that it generates untyped trees as output. 
+    // It does not explicitly use untypecheck. Instead it rebuilds trees and does not call typecheck or associate existing symbols correctly.
+    // While lazy will be disallowed anyway and case classes don't seem useful, match destructors seem important eventually. 
     
     object Construct {
       def parallel(ts: Iterable[Tree]) = {
@@ -338,9 +346,6 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
         })
       }
     }
-    
-    // TODO: This uses untypecheck. 
-    // While lazy will be disallowed anyway and case classes don't seem useful, match destructors seem important eventually. 
 
     def buildKindConvertion(sk: ValueKind, tk: ValueKind)(t: Tree): Tree = {
       import Constants._
@@ -789,7 +794,7 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
           case q"${callee @ q"$prefix.$f"}[..$targs](${lambda @ q"($x) => $e"})" if isOrcPrimitive(callee) =>
             //println(s"Call ${callee.symbol} $lambda")
             val e1 = atOwner(lambda, currentOwner) { recur(e, Set(OrcValue)) }
-            // This untypecheck should always be safe because none of the problem cases are in argument positions.
+            // This untypecheck should always be safe because none of the problem cases are in formal argument positions.
             q"${recur(prefix, Set(kindForOrcPrimitivePrefix(callee)))}.$f[..$targs]((${untypecheck(x)}) => ${e1})".setKind(OrcValue)
           
           // Rules for handling calls.

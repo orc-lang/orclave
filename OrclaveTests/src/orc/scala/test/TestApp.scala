@@ -23,12 +23,8 @@ object TestApp {
 
   def main(args: Array[String]): Unit = {
     val r = orclave {
-      val a = List(1, 2)
-      scalaclave{
-        (a: List[Int]) match {
-          case List(a, b) => a + b
-        }
-      }
+      def f(x: Int)(y: Int) = x + y
+      f(5)(4)
     }
 
     for (p <- r) {
