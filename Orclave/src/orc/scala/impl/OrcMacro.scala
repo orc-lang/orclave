@@ -684,7 +684,7 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
         println(s">> [${tree.kind} => {${allowedKinds.mkString(", ")}} (from ${extAllowedKinds.mkString(", ")}})] $tree", currentPos)
       
       val result = withIndent(currentPos) {
-        val result = tree match {
+        val result: Tree = tree match {
           // Remove type fixers
           case q"${ f @ q"$prefix.$n" }[$_]($e)" if typeFixerSymbols contains f.symbol =>
             //println(s"Type fixer: ${f.symbol} $e ${tree}")
@@ -878,9 +878,31 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
                 q"if($cond1) ${recur(thenp, Set(OrcValue))} else ${recur(elsep, Set(OrcValue))}"
             }
             
+          // Rules for handling match and case
+          case matche @ q"$sel match { case ..$cases }" =>
+            error(tree.pos, s"Pattern matching not supported in Orclave.")
+            tree
+            /*
+            buildApply(List(List(sel)), List(List(sel.tpe)), matche.tpe.withKind(OrcValue), OrcValue, currentPos) {
+              argss =>
+                val List(List(sel1)) = argss
+                q"$sel1 match { case ..${cases map { c => recur(c, Set(OrcValue)) }} }"
+            }
+            */
+          /*
+          case casee @ cq"$pat if $cond => $expr" =>
+            cq"${untypecheck(pat)} if ${recur(cond, Set(ScalaValue))} => ${recur(expr, Set(OrcValue))}".setKind(OrcValue)
+          */
+          case matche @ q"{ case ..$cases }" =>
+            error(tree.pos, s"Partial functions not supported in Orclave.")
+            tree
+            
           // Things I don't care about and can pass through.
           case t @ TypeTree() =>
             t
+          case EmptyTree =>
+            EmptyTree
+            
           case t =>
             error(currentPos, s"Unsupported expression in Orclave: ${t}")
             t
