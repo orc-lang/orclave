@@ -6,6 +6,7 @@ import orc.scala.Orc._
 import scala.concurrent.ExecutionContext
 import scala.concurrent.Future
 import orc.scala.impl.FutureUtil
+import java.util.Arrays
 
 object TestApp {
   implicit val ctx = OrcExecutionContext(ExecutionContext.global)
@@ -22,12 +23,7 @@ object TestApp {
 
   def main(args: Array[String]): Unit = {
     val r = orclave {
-      def f(t: Int, x: Int): String = for (_ <- badSleep(t)) yield {
-        x.toString() ||| (println(s"$x") andthen f(t, x + 1))
-      }
-      trim {
-        f(100, 1)
-      }
+      List(1, 2)
     }
 
     for (p <- r) {

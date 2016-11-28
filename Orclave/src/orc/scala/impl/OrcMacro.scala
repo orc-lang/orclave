@@ -259,6 +259,14 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
     }
 
     def kind: ValueKind = ValueKind(t)
+    
+    def isRepeatedParam = {
+      val s = t.typeConstructor.typeSymbol
+      if(s.isClass)
+        Set(definitions.RepeatedParamClass, definitions.JavaRepeatedParamClass).contains(s.asClass)
+      else
+        false
+    }
   }
   
   class FindFreeVariables(predicate: Ident => Boolean) extends Traverser {
@@ -318,6 +326,7 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
      * + if statements
      * - pattern matching
      * - Orc objects
+     * - calling Java static members
      */
     
     object Construct {
@@ -399,7 +408,7 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
           "expr"
       }
       
-      sealed trait Argument {
+      sealed trait Argument extends Product {
         val name: String
         def freshRefName(r: String) = freshName(TermName(s"${name}_$r"))
         def argumentExpr(kind: ValueKind): Tree
@@ -433,7 +442,25 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
         assume(futureExpr.kind == FutureValue)
       }
       
-      val arguments = (argss innerZip argTypess).innerMap { case (arg, tpe) =>
+      def zipArgsWithTypes[A](p: (List[A], List[Type])) = {
+        val (args: List[A], types: List[Type]) = p
+        val allTypes: Iterable[Type] = if(!types.isEmpty && types.last.isRepeatedParam) {
+          if(args.size < types.size)
+            error(pos, s"Wrong number of arguments to function calls. This should always have been caught by the first pass type checking.")
+          types.init.to[Stream] ++ Stream.continually(types.last) 
+        } else {
+          if(args.size != types.size)
+            error(pos, s"Wrong number of arguments to function calls. This should always have been caught by the first pass type checking.")
+          types
+        }
+        args zip allTypes
+      }
+      
+      def zipWithArgTypes[A](argss: List[List[A]]) = (argss zip argTypess) map zipArgsWithTypes
+      
+      //println(s"Call with $argss and $argTypess ${showRaw(argTypess)}")
+      val arguments = zipWithArgTypes(argss).innerMap { case (arg, tpe) =>
+        //println(s"Arg: $arg : $tpe")
         val n = refName(arg)
         val e = recur(arg, Set(OrcValue, FutureValue, ScalaValue))
         (e.kind, tpe.kind) match {
@@ -456,7 +483,7 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
       }
       
       lazy val core = {
-        val c = coreFunc((arguments innerZip argTypess).innerMap { p =>
+        val c = coreFunc(zipWithArgTypes(arguments).innerMap { p =>
           val (x, formalTpe) = p
           val arg = x.argumentExpr(formalTpe.kind)
           arg
@@ -497,9 +524,7 @@ class OrcMacro(val c: Context) extends OwnerSplicer {
         }
       }
       
-      // println(s"Arg info: ${argss innerZip arguments innerZip argTypess}")
-            
-      lazy val forcedValues = (arguments innerZip argTypess).flatten.collect { 
+      lazy val forcedValues = zipWithArgTypes(arguments).flatten.collect { 
         case (f: ForcedArg, formalTpe) if formalTpe.kind == ScalaValue => f
       }
       lazy val forceCore = force(forcedValues, core)
