@@ -1,0 +1,96 @@
+Untyped scala to A-normal-form:
+Scala cannot be converted to A-normal form without types because it will break type inference and implicit resolution.
+For instance, lambdas cannot have their argument types inferred without a typed context and that context will not be available in the lifted val.
+Implicits can be introduced by the later implicit resolution so things do not STAY in A-normal form even if they were converted properly.
+
+The issues with implicits can be avoided by defining implicits as sequential instead of being part of the implicit concurrency.
+The issue of type checking probably cannot be addressed without being able to manipulate type information at some point.
+However working around the problem by adding type annotations to the source program is always possible.
+
+
+Transform rules:
+
+The transform function orcify(e) is defined as follows.
+orcify(e) is an untyped Scala expression which will be given type Orc[T] for some T.
+e is an untyped A-normal-form Scala expression.
+The functions valueToOrc, ... are polymorphic and accept an argument of types Orc[T], Future[T], or T and return Orc[T] in all cases.
+A-normal form in this case treats scalaclave(e) as a function call taking every free variable in e as an argument.
+
+------
+
+Constant or Variable:
+x
+   ========>
+valueToOrc(x)
+
+------
+
+Scalaclave:
+scalaclave(e)
+   ========>
+scalaclave(e)
+
+------
+
+Apply Expression:
+p.m(b1, ..., bn)
+   ========>
+callToOrc(p.m(b1, ..., bn))
+
+------
+
+Select Expression:
+a.f
+   ========>
+Just as f'(a) for an appropriate f' which returns a.f.
+Fields of type Future or Orc are handled like return values of those types.
+
+------
+
+Match: (this is design restricts cond to pure scala not Orc)
+a match {
+  case pat if cond => b
+  ...
+}
+========>
+matchToOrc(a, {
+  case pat =>
+    val x' = valueToOrc(x)
+    ... for each variable bound by pat ...
+    ??? cond ???
+    orcify(b[x -> x', ...])
+}, ...)
+
+------
+
+Val:
+{
+  <non-synthetic> val x: T = a
+  b
+}
+   ========>
+{
+  val x_graft = orcify(a: T).graft
+  val x = x_graft.future
+  orcify(b) ||| x_graft.body
+}
+
+------
+
+Def:
+def f(x1: T1, ..., xn: Tn): R = a
+   ========>
+def f(x1: Future[T1], ..., xn: Future[Tn]): Orc[R] = orcify(a: R)
+
+------
+
+Site:
+@site def f(x1: T1, ..., xn: Tn): R = a
+   ========>
+@site def f(x1: T1, ..., xn: Tn): Orc[R] = orcify(a: R)
+
+------
+
+Branch, parallel, otherwise, and trim use congruence rules.
+Calls on Orc objects or the Orc object are not handled as normal calls.
+They are ignored and passed through. This one case should handle many of the combinators.
